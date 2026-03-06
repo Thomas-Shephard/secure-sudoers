@@ -1,0 +1,62 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: never
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --component rustfmt,clippy --no-self-update
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: Privileged Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build Privileged Test Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: secure-sudoers-test:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run Privileged Tests
+        run: |
+          docker run --rm --privileged -v ${{ github.workspace }}:/output secure-sudoers-test:latest \
+            bash -c "/workspace/run_privileged_tests.sh && cp /workspace/cobertura.xml /output/"
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: code-coverage
+          path: cobertura.xml
