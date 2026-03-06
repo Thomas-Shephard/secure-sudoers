@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/secure-sudoers-common",
+    "crates/secure-sudoers",
+    "crates/secure-sudoers-utils",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+authors = ["Secure Sudoers Contributors <security@example.com>"]
+license = "MIT"
+
+[workspace.metadata.deb]
+maintainer = "Secure Sudoers Contributors <security@example.com>"
+copyright = "2024, Secure Sudoers Contributors"
+license-file = "LICENSE"
+extended-description = "A policy-driven sudo delegation framework."
+depends = "$auto"
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/secure-sudoers",       "usr/local/bin/", "0755"],
+    ["target/release/secure-sudoers-utils", "usr/local/bin/", "0755"],
+    ["crates/secure-sudoers/secure-sudoers.1", "usr/share/man/man1/", "0644"],
+    ["crates/secure-sudoers-utils/secure-sudoers-utils.1", "usr/share/man/man1/", "0644"],
+]
