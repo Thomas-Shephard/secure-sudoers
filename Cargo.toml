@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/secure-sudoers-common",
+    "crates/secure-sudoers",
+    "crates/secure-sudoers-utils",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+authors = ["Thomas Shephard"]
+license = "MIT"
