@@ -17,26 +17,18 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            apt_pkgs: ""
-            linker: ""
             bin_suffix: x86_64-linux
             use_zigbuild: false
             make_deb: true
           - target: x86_64-unknown-linux-musl
-            apt_pkgs: musl-tools
-            linker: musl-gcc
             bin_suffix: x86_64-linux-musl
-            use_zigbuild: false
+            use_zigbuild: true
             make_deb: false
           - target: aarch64-unknown-linux-gnu
-            apt_pkgs: gcc-aarch64-linux-gnu
-            linker: aarch64-linux-gnu-gcc
             bin_suffix: aarch64-linux
-            use_zigbuild: false
+            use_zigbuild: true
             make_deb: false
           - target: aarch64-unknown-linux-musl
-            apt_pkgs: ""
-            linker: ""
             bin_suffix: aarch64-linux-musl
             use_zigbuild: true
             make_deb: false
@@ -52,47 +44,44 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install system packages
-        if: matrix.apt_pkgs != ''
-        run: sudo apt-get update -qq && sudo apt-get install -y ${{ matrix.apt_pkgs }}
-      - name: Install Zig
-        if: matrix.use_zigbuild
-        uses: goto-bus-stop/setup-zig@v2
-      - name: Install cargo-zigbuild
-        if: matrix.use_zigbuild
-        run: cargo install cargo-zigbuild --locked
-      - name: Configure cross-linker
-        if: matrix.linker != ''
+      - name: Set up swap space
         run: |
-          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')
-          echo "CARGO_TARGET_${TARGET_UPPER}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
-          echo "CC_${TARGET_UPPER}=${{ matrix.linker }}" >> "$GITHUB_ENV"
-      - name: Cache Cargo registry
+          SWAPFILE=/swapfile
+          if [ -f "$SWAPFILE" ]; then
+            sudo swapoff "$SWAPFILE" || true
+          fi
+          sudo fallocate -l 8G "$SWAPFILE"
+          sudo chmod 600 "$SWAPFILE"
+          sudo mkswap "$SWAPFILE"
+          sudo swapon "$SWAPFILE"
+          free -h
+      - name: Install Zig and cargo-zigbuild
+        if: matrix.use_zigbuild
+        uses: messense/cargo-zigbuild@v0.1.1
+      - name: Cache Cargo and Zig
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+            ~/.cache/zig
+          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-${{ matrix.target }}-
       - name: Build (cargo)
         if: "!matrix.use_zigbuild"
         run: |
-          cargo build \
-            --workspace \
-            --release \
-            --features network-update \
-            --target ${{ matrix.target }}
+          cargo build -p secure-sudoers --release --target ${{ matrix.target }} --verbose
+          cargo build -p secure-sudoers-utils --release --features network-update --target ${{ matrix.target }} --verbose
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
       - name: Build (cargo-zigbuild)
         if: matrix.use_zigbuild
         run: |
-          cargo zigbuild \
-            --workspace \
-            --release \
-            --features network-update \
-            --target ${{ matrix.target }}
+          cargo zigbuild -p secure-sudoers --release --target ${{ matrix.target }} --verbose
+          cargo zigbuild -p secure-sudoers-utils --release --features network-update --target ${{ matrix.target }} --verbose
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
       - name: Stage binaries
         run: |
           mkdir -p dist
