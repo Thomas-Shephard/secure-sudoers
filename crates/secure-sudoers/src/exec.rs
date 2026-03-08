@@ -34,9 +34,25 @@ pub fn execute_securely(cmd: &ValidatedCommand, policy: &SecureSudoersPolicy) ->
         .collect();
     let envp = envp?;
 
-    match fexecve(&binary_file, &argv, &envp) {
-        Ok(infallible) => match infallible {},
-        Err(e) => Err(format!("fexecve failed: {e}")),
+    match unsafe { nix::unistd::fork() } {
+        Ok(nix::unistd::ForkResult::Parent { child }) => {
+            unsafe {
+                libc::signal(libc::SIGINT, libc::SIG_IGN);
+                libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+            }
+            match nix::sys::wait::waitpid(child, None) {
+                Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => std::process::exit(code),
+                Ok(nix::sys::wait::WaitStatus::Signaled(_, sig, _)) => std::process::exit(128 + sig as i32),
+                _ => std::process::exit(1),
+            }
+        }
+        Ok(nix::unistd::ForkResult::Child) => {
+            match fexecve(&binary_file, &argv, &envp) {
+                Ok(infallible) => match infallible {},
+                Err(e) => Err(format!("fexecve failed: {e}")),
+            }
+        }
+        Err(e) => Err(format!("fork failed: {e}")),
     }
 }
 

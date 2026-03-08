@@ -26,7 +26,7 @@ pub fn write_key_file(path: &str, label: &str, bytes: &[u8], unix_mode: u32) -> 
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut f = std::fs::OpenOptions::new()
-        .write(true).create(true).truncate(true).mode(unix_mode)
+        .write(true).create_new(true).mode(unix_mode)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
         .map_err(|e| format!("Failed to create {path}: {e}"))?;
