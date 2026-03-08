@@ -14,7 +14,7 @@ pub fn setup_isolation(
     apply_blocked_paths(blocked_paths)?;
 
     for arg in cmd_args {
-        if arg.starts_with('/') || arg.contains('/') {
+        if std::path::Path::new(arg).exists() || arg.contains('/') {
             validate_path_isolated(arg, blocked_paths)?;
         }
     }
