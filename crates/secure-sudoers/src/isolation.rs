@@ -30,58 +30,84 @@ fn validate_path_isolated(path_str: &str, blocked_paths: &[String]) -> Result<()
 }
 
 fn apply_blocked_paths(paths: &[String]) -> Result<(), String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
+
     for path_str in paths {
         let path = std::path::Path::new(path_str);
-        if let Ok(st) = path.metadata() {
-            if st.is_dir() {
-                mount(Some("tmpfs"), path_str.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
-                    .map_err(|e| format!("Security failure: tmpfs mount on blocked dir '{}' failed: {e}", path_str))?;
-            } else {
-                mount(Some("/dev/null"), path_str.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
-                    .map_err(|e| format!("Security failure: bind mount /dev/null on blocked file '{}' failed: {e}", path_str))?;
-            }
-        } else {
-            // Path doesn't exist, find the first missing component and mask it
-            let mut components = Vec::new();
-            let mut current = path;
-            while !current.exists() {
-                components.push(current);
-                if let Some(parent) = current.parent() {
-                    current = parent;
-                } else {
-                    break;
-                }
-            }
+        
+        let mut current_fd = match std::fs::File::open("/") {
+            Ok(f) => f,
+            Err(e) => return Err(format!("Security failure: cannot open root: {e}")),
+        };
 
-            if let Some(to_create) = components.last() {
-                let to_create_str = to_create.to_string_lossy().into_owned();
-                let is_dir = to_create != &path;
+        let components: Vec<_> = path.components().skip(1).collect();
+        for (i, comp) in components.iter().enumerate() {
+            let comp_str = comp.as_os_str().to_str().ok_or("Invalid path component")?;
+            let is_last = i == components.len() - 1;
 
-                if is_dir {
-                    if let Ok(meta) = std::fs::symlink_metadata(to_create) {
-                        if meta.file_type().is_symlink() {
-                            return Err(format!("Security failure: mask directory target '{}' is a symlink", to_create_str));
+            let next_fd_res = std::fs::OpenOptions::new()
+                .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(format!("/proc/self/fd/{}/{}", current_fd.as_raw_fd(), comp_str));
+
+            match next_fd_res {
+                Ok(f) => { current_fd = f; }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let c_comp = std::ffi::CString::new(comp_str).map_err(|_| "Nul byte in path component")?;
+                    if is_last && !path_str.ends_with('/') {
+                        let fd = unsafe {
+                            libc::openat(current_fd.as_raw_fd(), 
+                                c_comp.as_ptr(),
+                                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                                0o000)
+                        };
+                        if fd < 0 {
+                            let err = std::io::Error::last_os_error();
+                            if err.kind() != std::io::ErrorKind::AlreadyExists {
+                                return Err(format!("Security failure: cannot create mask file '{}': {}", path_str, err));
+                            }
+                        } else {
+                            current_fd = unsafe { std::fs::File::from_raw_fd(fd) };
+                            break; 
+                        }
+                    } else {
+                        let ret = unsafe {
+                            libc::mkdirat(current_fd.as_raw_fd(),
+                                c_comp.as_ptr(),
+                                0o000)
+                        };
+                        if ret != 0 {
+                            let err = std::io::Error::last_os_error();
+                            if err.kind() != std::io::ErrorKind::AlreadyExists {
+                                return Err(format!("Security failure: cannot create mask dir '{}': {}", path_str, err));
+                            }
                         }
                     }
-                    std::fs::create_dir_all(to_create)
-                        .map_err(|e| format!("Security failure: cannot create mask dir '{}': {e}", to_create_str))?;
-                    mount(Some("tmpfs"), to_create_str.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
-                        .map_err(|e| format!("Security failure: tmpfs mount on mask dir '{}' failed: {e}", to_create_str))?;
-                } else {
-                    if let Some(parent) = to_create.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    std::fs::OpenOptions::new()
-                        .write(true).create(true).truncate(true)
-                        .custom_flags(libc::O_NOFOLLOW)
-                        .open(to_create)
-                        .map_err(|e| format!("Security failure: cannot safely create mask file '{}': {e}", to_create_str))?;
 
-                    mount(Some("/dev/null"), to_create_str.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
-                        .map_err(|e| format!("Security failure: bind mount /dev/null on mask file '{}' failed: {e}", to_create_str))?;
+                    current_fd = std::fs::OpenOptions::new()
+                        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                        .open(format!("/proc/self/fd/{}/{}", current_fd.as_raw_fd(), comp_str))
+                        .map_err(|e| format!("Security failure: cannot open component '{}' of '{}' after creation: {}", comp_str, path_str, e))?;
                 }
+                Err(e) => return Err(format!("Security failure: error traversing '{}' at '{}': {}", path_str, comp_str, e)),
             }
+        }
+
+        let fd = current_fd.as_raw_fd();
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } != 0 {
+            return Err(format!("Security failure: fstat failed on '{}'", path_str));
+        }
+
+        let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+        let proc_path = format!("/proc/self/fd/{}", fd);
+
+        if is_dir {
+            mount(Some("tmpfs"), proc_path.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
+                .map_err(|e| format!("Security failure: tmpfs mount on blocked dir '{}' failed: {e}", path_str))?;
+        } else {
+            mount(Some("/dev/null"), proc_path.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
+                .map_err(|e| format!("Security failure: bind mount /dev/null on blocked file '{}' failed: {e}", path_str))?;
         }
     }
     Ok(())
