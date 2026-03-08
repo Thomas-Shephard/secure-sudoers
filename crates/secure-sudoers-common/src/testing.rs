@@ -1,6 +1,6 @@
 #[cfg(feature = "testing")]
 pub mod fixtures {
-    use crate::models::{GlobalSettings, IsolationSettings, SecureSudoersPolicy, ToolPolicy};
+    use crate::models::{GlobalSettings, IsolationSettings, SecureSudoersPolicy, ToolPolicy, UnauthorizedAuditMode};
     use std::collections::HashMap;
 
     pub fn make_policy() -> SecureSudoersPolicy {
@@ -46,6 +46,7 @@ pub mod fixtures {
                 dry_run: false,
                 blocked_paths: vec!["/etc/shadow".to_string(), "/root".to_string()],
                 bypass_groups: vec!["sudo".to_string()],
+                unauthorized_audit_mode: UnauthorizedAuditMode::Minimal,
                 default_isolation: None,
             },
             tools,

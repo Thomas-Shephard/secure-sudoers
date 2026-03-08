@@ -108,6 +108,15 @@ fn default_bypass_groups() -> Vec<String> {
     vec!["sudo".to_string(), "wheel".to_string()]
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UnauthorizedAuditMode {
+    #[default]
+    Minimal,
+    KeysOnly,
+    Full,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalSettings {
@@ -127,6 +136,8 @@ pub struct GlobalSettings {
     pub blocked_paths: Vec<String>,
     #[serde(default = "default_bypass_groups")]
     pub bypass_groups: Vec<String>,
+    #[serde(default)]
+    pub unauthorized_audit_mode: UnauthorizedAuditMode,
     pub default_isolation: Option<IsolationSettings>,
 }
 

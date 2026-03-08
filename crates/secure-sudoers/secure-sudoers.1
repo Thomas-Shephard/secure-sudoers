@@ -32,6 +32,17 @@ A regex that all positional arguments must match unless they are specifically va
 .TP
 .B blocked_paths
 A list of absolute paths that are blocked globally (e.g., /etc/shadow, /root).
+.TP
+.B unauthorized_audit_mode
+Determines how arguments are logged for unauthorized tools.
+.RS
+.IP \(bu 2
+\fBminimal\fR (default): Logs only the count of arguments (e.g., "[3 arguments suppressed]").
+.IP \(bu 2
+\fBkeys_only\fR: Logs flag names but redacts their values and all positional arguments.
+.IP \(bu 2
+\fBfull\fR: Logs all raw arguments in the clear.
+.RE
 .SS Tool Policies
 Each tool entry defines:
 .TP
@@ -40,6 +51,9 @@ The absolute path to the actual binary to execute.
 .TP
 .B verbs
 A list of allowed subcommands (e.g., "install", "update").
+.TP
+.B sensitive_flags
+A list of flags whose arguments should always be redacted in logs (e.g., "--password").
 .TP
 .B flags
 Allowed simple flags (e.g., "-y", "--quiet").

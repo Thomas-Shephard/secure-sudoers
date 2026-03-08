@@ -39,41 +39,89 @@ pub fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
     serde_json::from_slice::<SecureSudoersPolicy>(&policy_bytes)
         .map_err(|e| format!("Failed to parse validated policy JSON: {e}"))
 }
-
 pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &str) -> Vec<String> {
-    let sensitive_flags = match policy.tools.get(tool_name) {
-        Some(tool) => &tool.sensitive_flags,
-        None => return args.to_vec(),
-    };
-    let mut redacted = Vec::with_capacity(args.len());
-    let mut skip_next = false;
-    for arg in args {
-        if skip_next {
-            redacted.push("[REDACTED]".to_string());
-            skip_next = false;
-            continue;
-        }
-
-        if let Some(idx) = arg.find('=') {
-            let key = &arg[..idx];
-            if sensitive_flags.iter().any(|f| f == key) {
-                redacted.push(format!("{}=[REDACTED]", key));
+    if let Some(tool) = policy.tools.get(tool_name) {
+        let sensitive_flags = &tool.sensitive_flags;
+        let mut redacted = Vec::with_capacity(args.len());
+        let mut skip_next = false;
+        for arg in args {
+            if skip_next {
+                redacted.push("[REDACTED]".to_string());
+                skip_next = false;
                 continue;
             }
-        }
 
-        redacted.push(arg.clone());
-        if sensitive_flags.contains(arg) {
-            skip_next = true;
+            if let Some(idx) = arg.find('=') {
+                let key = &arg[..idx];
+                if sensitive_flags.iter().any(|f| f == key) {
+                    redacted.push(format!("{}=[REDACTED]", key));
+                    continue;
+                }
+            }
+
+            redacted.push(arg.clone());
+            if sensitive_flags.contains(arg) {
+                skip_next = true;
+            }
+        }
+        redacted
+    } else {
+        use secure_sudoers_common::models::UnauthorizedAuditMode;
+        match policy.global_settings.unauthorized_audit_mode {
+            UnauthorizedAuditMode::Minimal => {
+                vec![format!("[{} arguments suppressed]", args.len())]
+            }
+            UnauthorizedAuditMode::KeysOnly => {
+                args.iter().map(|arg| {
+                    if let Some(idx) = arg.find('=') {
+                        let key = &arg[..idx];
+                        if key.starts_with('-') {
+                            return format!("{}=[REDACTED]", key);
+                        }
+                    } else if arg.starts_with('-') {
+                        return arg.clone();
+                    }
+                    "[REDACTED]".to_string()
+                }).collect()
+            }
+            UnauthorizedAuditMode::Full => args.to_vec(),
         }
     }
-    redacted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use secure_sudoers_common::testing::fixtures::{args as argv, make_policy};
+    use secure_sudoers_common::models::UnauthorizedAuditMode;
+
+    #[test]
+    fn test_redact_args_unauthorized_minimal() {
+        let mut policy = make_policy();
+        policy.global_settings.unauthorized_audit_mode = UnauthorizedAuditMode::Minimal;
+        let args = argv(&["--pass", "secret", "pos"]);
+        let redacted = redact_args(&args, &policy, "unknown");
+        assert_eq!(redacted, vec!["[3 arguments suppressed]"]);
+    }
+
+    #[test]
+    fn test_redact_args_unauthorized_keys_only() {
+        let mut policy = make_policy();
+        policy.global_settings.unauthorized_audit_mode = UnauthorizedAuditMode::KeysOnly;
+        let args = argv(&["--pass=secret", "-f", "pos"]);
+        let redacted = redact_args(&args, &policy, "unknown");
+        // -f is kept as a key, --pass= is kept, pos is redacted
+        assert_eq!(redacted, vec!["--pass=[REDACTED]", "-f", "[REDACTED]"]);
+    }
+
+    #[test]
+    fn test_redact_args_unauthorized_full() {
+        let mut policy = make_policy();
+        policy.global_settings.unauthorized_audit_mode = UnauthorizedAuditMode::Full;
+        let args = argv(&["--pass", "secret"]);
+        let redacted = redact_args(&args, &policy, "unknown");
+        assert_eq!(redacted, args);
+    }
 
     #[test]
     fn test_redact_args_with_equals_syntax() {
