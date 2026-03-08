@@ -1,34 +1,6 @@
-use nix::errno::Errno;
 use nix::mount::{MsFlags, mount};
 use nix::sched::{CloneFlags, unshare};
 use secure_sudoers_common::models::IsolationSettings;
-use std::os::unix::fs::OpenOptionsExt;
-
-const CAP_DAC_OVERRIDE: libc::c_int = 1;
-const CAP_KILL: libc::c_int = 5;
-const CAP_NET_ADMIN: libc::c_int = 12;
-const CAP_NET_RAW: libc::c_int = 13;
-const CAP_SYS_MODULE: libc::c_int = 16;
-const CAP_SYS_RAWIO: libc::c_int = 17;
-const CAP_SYS_PTRACE: libc::c_int = 19;
-const CAP_SYS_ADMIN: libc::c_int = 21;
-const CAP_SYS_BOOT: libc::c_int = 22;
-const CAP_MKNOD: libc::c_int = 27;
-const CAP_AUDIT_WRITE: libc::c_int = 29;
-
-const DANGEROUS_CAPS: &[libc::c_int] = &[
-    CAP_SYS_ADMIN,
-    CAP_SYS_PTRACE,
-    CAP_SYS_MODULE,
-    CAP_NET_ADMIN,
-    CAP_NET_RAW,
-    CAP_SYS_RAWIO,
-    CAP_MKNOD,
-    CAP_DAC_OVERRIDE,
-    CAP_SYS_BOOT,
-    CAP_AUDIT_WRITE,
-    CAP_KILL,
-];
 
 pub fn setup_isolation(
     settings: &IsolationSettings,
@@ -58,31 +30,18 @@ fn validate_path_isolated(path_str: &str, blocked_paths: &[String]) -> Result<()
 }
 
 fn apply_blocked_paths(paths: &[String]) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
     for path_str in paths {
-        let file: std::fs::File = match std::fs::OpenOptions::new()
-            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path_str)
-        {
-            Ok(f) => f,
+        let st = match std::fs::metadata(path_str) {
+            Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("Security failure: cannot anchor blocked path '{}': {e}", path_str)),
+            Err(e) => return Err(format!("Security failure: cannot stat blocked path '{}': {e}", path_str)),
         };
 
-        let fd = file.as_raw_fd();
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd, &mut st) } != 0 {
-            return Err(format!("Security failure: fstat failed on blocked path '{}'", path_str));
-        }
-
-        let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
-        let proc_fd_path = format!("/proc/self/fd/{}", fd);
-
-        if is_dir {
-            mount(Some("tmpfs"), proc_fd_path.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
+        if st.is_dir() {
+            mount(Some("tmpfs"), path_str.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
                 .map_err(|e| format!("Security failure: tmpfs mount on blocked dir '{}' failed: {e}", path_str))?;
         } else {
-            mount(Some("/dev/null"), proc_fd_path.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
+            mount(Some("/dev/null"), path_str.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
                 .map_err(|e| format!("Security failure: bind mount /dev/null on blocked file '{}' failed: {e}", path_str))?;
         }
     }
@@ -122,13 +81,39 @@ fn apply_readonly_mounts(paths: &[String]) -> Result<(), String> {
 }
 
 pub fn drop_capabilities() -> Result<(), String> {
-    for &cap in DANGEROUS_CAPS {
-        let ret = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
-        if ret != 0 {
-            let err = Errno::last();
-            if err == Errno::EINVAL { continue; }
-            return Err(format!("prctl(PR_CAPBSET_DROP, CAP={cap}) failed: {err}"));
-        }
+    for cap in 0..64 {
+        let _ = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
     }
+
+    #[repr(C)]
+    struct CapHeader {
+        version: u32,
+        pid: i32,
+    }
+    #[repr(C)]
+    struct CapData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    let header = CapHeader {
+        version: 0x20080522, // _LINUX_CAPABILITY_VERSION_3
+        pid: 0,
+    };
+    let data = [
+        CapData { effective: 0, permitted: 0, inheritable: 0 },
+        CapData { effective: 0, permitted: 0, inheritable: 0 },
+    ];
+
+    let ret = unsafe {
+        libc::syscall(libc::SYS_capset, &header as *const CapHeader, &data as *const CapData)
+    };
+
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(format!("Security failure: capset failed: {err}"));
+    }
+
     Ok(())
 }

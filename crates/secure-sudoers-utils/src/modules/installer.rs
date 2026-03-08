@@ -41,17 +41,20 @@ fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
 fn install() -> Result<(), String> {
     require_root()?;
     let policy = load_policy(INSTALL_POLICY_PATH)?;
+    policy.validate().map_err(|e| format!("Policy validation failed: {e}"))?;
+
     let mut tool_names: Vec<String> = policy.tools.keys().cloned().collect();
     tool_names.sort_unstable();
     println!("Installing {} tool(s)...", tool_names.len());
-    let symlink_errors = install_symlinks(&tool_names, INSTALL_BINARY);
-    write_sudoers_file(&tool_names)?;
+
+    let (successful_tools, symlink_errors) = install_symlinks(&tool_names, INSTALL_BINARY);
+    write_sudoers_file(&successful_tools)?;
 
     let mut targets: Vec<String> = vec![
         INSTALL_BINARY.to_string(), INSTALL_UTILS_BINARY.to_string(),
         INSTALL_POLICY_PATH.to_string(), INSTALL_SUDOERS_PATH.to_string(),
     ];
-    targets.extend(tool_names.iter().map(|t| format!("{SYMLINK_DIR}/{t}")));
+    targets.extend(successful_tools.iter().map(|t| format!("{SYMLINK_DIR}/{t}")));
     let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
     for e in chattr_op("+i", &refs) {
         eprintln!("Warning: chattr +i failed: {e}");
@@ -67,6 +70,8 @@ fn install() -> Result<(), String> {
 fn unlock() -> Result<(), String> {
     require_root()?;
     let policy = load_policy(INSTALL_POLICY_PATH)?;
+    let _ = policy.validate();
+
     let mut tool_names: Vec<String> = policy.tools.keys().cloned().collect();
     tool_names.sort_unstable();
     let mut targets: Vec<String> = vec![
@@ -86,7 +91,8 @@ fn unlock() -> Result<(), String> {
     Ok(())
 }
 
-fn install_symlinks(tools: &[String], binary: &str) -> Vec<String> {
+fn install_symlinks(tools: &[String], binary: &str) -> (Vec<String>, Vec<String>) {
+    let mut successful = Vec::new();
     let mut errors = Vec::new();
     for tool in tools {
         if !secure_sudoers_common::models::is_valid_tool_name(tool) {
@@ -94,37 +100,44 @@ fn install_symlinks(tools: &[String], binary: &str) -> Vec<String> {
             continue;
         }
         let link_path = std::path::Path::new(SYMLINK_DIR).join(tool);
+        let mut skip = false;
         match std::fs::symlink_metadata(&link_path) {
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
                     if let Err(e) = std::fs::remove_file(&link_path) {
                         errors.push(format!("Cannot remove old symlink {}: {e}", link_path.display()));
-                        continue;
+                        skip = true;
                     }
                 } else if meta.file_type().is_file() {
                     let backup = format!("{}.bak", link_path.display());
                     if let Err(e) = std::fs::rename(&link_path, &backup) {
                         errors.push(format!("Cannot back up {}: {e}", link_path.display()));
-                        continue;
+                        skip = true;
+                    } else {
+                        println!("  Backed up {} -> {backup}", link_path.display());
                     }
-                    println!("  Backed up {} -> {backup}", link_path.display());
                 } else {
                     errors.push(format!("Skipping {}: not a regular file or symlink", link_path.display()));
-                    continue;
+                    skip = true;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
                 errors.push(format!("Cannot stat {}: {e}", link_path.display()));
-                continue;
+                skip = true;
             }
         }
+        if skip { continue; }
+
         match std::os::unix::fs::symlink(binary, &link_path) {
-            Ok(()) => println!("  Symlinked {} -> {binary}", link_path.display()),
+            Ok(()) => {
+                println!("  Symlinked {} -> {binary}", link_path.display());
+                successful.push(tool.clone());
+            }
             Err(e) => errors.push(format!("Cannot create symlink {} -> {binary}: {e}", link_path.display())),
         }
     }
-    errors
+    (successful, errors)
 }
 
 fn write_sudoers_file(tools: &[String]) -> Result<(), String> {
