@@ -19,8 +19,8 @@ pub fn cmd_gen_keys() -> Result<(), String> {
 
 pub fn write_key_file(path: &str, label: &str, bytes: &[u8], unix_mode: u32) -> Result<(), String> {
     let content = format!(
-        "-----BEGIN {label}-----\n{hex}\n-----END {label}-----\n",
-        hex = secure_sudoers_common::util::bytes_to_hex(bytes)
+        "-----BEGIN {label}-----\n{b64}\n-----END {label}-----\n",
+        b64 = secure_sudoers_common::util::bytes_to_base64(bytes)
     );
 
     use std::io::Write;

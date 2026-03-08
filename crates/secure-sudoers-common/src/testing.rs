@@ -45,7 +45,6 @@ pub mod fixtures {
                 common_env_whitelist: vec![],
                 dry_run: false,
                 blocked_paths: vec!["/etc/shadow".to_string(), "/root".to_string()],
-                require_toctou_protection: true,
                 bypass_groups: vec!["sudo".to_string()],
                 default_isolation: None,
             },

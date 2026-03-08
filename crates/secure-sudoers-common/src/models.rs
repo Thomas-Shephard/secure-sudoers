@@ -125,14 +125,10 @@ pub struct GlobalSettings {
     pub dry_run: bool,
     #[serde(default = "default_blocked_paths")]
     pub blocked_paths: Vec<String>,
-    #[serde(default = "true_val")]
-    pub require_toctou_protection: bool,
     #[serde(default = "default_bypass_groups")]
     pub bypass_groups: Vec<String>,
     pub default_isolation: Option<IsolationSettings>,
 }
-
-fn true_val() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
