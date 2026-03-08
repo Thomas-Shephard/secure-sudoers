@@ -354,4 +354,51 @@ mod tests {
             "expected 'signature verification failed', got: {msg}"
         );
     }
+
+    macro_rules! require_root {
+        () => {
+            if unsafe { libc::getuid() } != 0 {
+                eprintln!("  [SKIP] test requires root");
+                return;
+            }
+        };
+    }
+
+    #[test]
+    fn test_run_supervisor_true_exits_zero() {
+        require_root!();
+
+        use crate::supervisor::run_supervisor;
+        use secure_sudoers_common::models::IsolationSettings;
+        use secure_sudoers_common::testing::fixtures::make_policy;
+        use secure_sudoers_common::validator::ValidatedCommand;
+
+        // Locate /usr/bin/true or /bin/true
+        let true_bin = if std::path::Path::new("/usr/bin/true").exists() {
+            "/usr/bin/true"
+        } else {
+            "/bin/true"
+        };
+
+        let cmd = ValidatedCommand::new_for_testing(
+            true_bin,
+            vec![],
+            IsolationSettings {
+                unshare_network: false,
+                unshare_pid: false,
+                unshare_ipc: false,
+                unshare_uts: false,
+                private_mounts: vec![],
+                readonly_mounts: vec![],
+            },
+            vec![],
+        );
+        // Use a policy with an empty blocked_paths list to avoid any
+        // mount-namespace complications with pre-existing paths.
+        let mut policy = make_policy();
+        policy.global_settings.blocked_paths.clear();
+
+        let result = run_supervisor(&cmd, &policy);
+        assert_eq!(result.unwrap(), 0, "/usr/bin/true must exit 0");
+    }
 }

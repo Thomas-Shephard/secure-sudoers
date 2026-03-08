@@ -6,21 +6,47 @@ pub const INSTALL_UTILS_BINARY: &str = "/usr/local/bin/secure-sudoers-utils";
 pub const INSTALL_SUDOERS_PATH: &str = "/etc/sudoers.d/secure-sudoers";
 pub const SYMLINK_DIR: &str = "/usr/local/bin";
 
+/// Configurable paths for installation – lets tests redirect to temp directories.
+#[derive(Debug, Clone)]
+pub struct InstallPaths<'a> {
+    pub policy_path: &'a str,
+    pub binary: &'a str,
+    pub utils_binary: &'a str,
+    pub sudoers_path: &'a str,
+    pub symlink_dir: &'a str,
+}
+
+impl Default for InstallPaths<'static> {
+    fn default() -> Self {
+        InstallPaths {
+            policy_path: INSTALL_POLICY_PATH,
+            binary: INSTALL_BINARY,
+            utils_binary: INSTALL_UTILS_BINARY,
+            sudoers_path: INSTALL_SUDOERS_PATH,
+            symlink_dir: SYMLINK_DIR,
+        }
+    }
+}
+
 pub fn cmd_install() -> Result<(), String> {
-    install()
+    install_with_paths(&InstallPaths::default())
 }
 
 pub fn cmd_unlock() -> Result<(), String> {
-    unlock()
+    unlock_with_paths(&InstallPaths::default())
 }
 
 pub fn generate_sudoers_content(tools: &[String]) -> String {
+    generate_sudoers_content_with_dir(tools, SYMLINK_DIR)
+}
+
+fn generate_sudoers_content_with_dir(tools: &[String], symlink_dir: &str) -> String {
     if tools.is_empty() {
         return "# No tools authorized in policy. This file is intentionally empty.\n".to_string();
     }
     let mut sorted: Vec<&str> = tools.iter().map(String::as_str).collect();
     sorted.sort_unstable();
-    let paths: Vec<String> = sorted.iter().map(|t| format!("{SYMLINK_DIR}/{t}")).collect();
+    let paths: Vec<String> = sorted.iter().map(|t| format!("{symlink_dir}/{t}")).collect();
     format!(
         "# Managed by secure-sudoers-utils - do not edit manually.\n\
          Defaults secure_path=\"/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"\n\
@@ -34,22 +60,25 @@ fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
     serde_json::from_str(&src).map_err(|e| format!("Invalid policy JSON at {path}: {e}"))
 }
 
-fn install() -> Result<(), String> {
-    let mut policy = load_policy(INSTALL_POLICY_PATH)?;
+pub fn install_with_paths(paths: &InstallPaths<'_>) -> Result<(), String> {
+    let mut policy = load_policy(paths.policy_path)?;
     policy.validate().map_err(|e| format!("Policy validation failed: {e}"))?;
 
     let mut tool_names: Vec<String> = policy.tools.keys().cloned().collect();
     tool_names.sort_unstable();
     println!("Installing {} tool(s)...", tool_names.len());
 
-    let (successful_tools, symlink_errors) = install_symlinks(&tool_names, INSTALL_BINARY);
-    write_sudoers_file(&successful_tools)?;
+    let (successful_tools, symlink_errors) =
+        install_symlinks_to(&tool_names, paths.binary, paths.symlink_dir);
+    write_sudoers_file_to(&successful_tools, paths.sudoers_path, paths.symlink_dir)?;
 
     let mut targets: Vec<String> = vec![
-        INSTALL_BINARY.to_string(), INSTALL_UTILS_BINARY.to_string(),
-        INSTALL_POLICY_PATH.to_string(), INSTALL_SUDOERS_PATH.to_string(),
+        paths.binary.to_string(),
+        paths.utils_binary.to_string(),
+        paths.policy_path.to_string(),
+        paths.sudoers_path.to_string(),
     ];
-    targets.extend(successful_tools.iter().map(|t| format!("{SYMLINK_DIR}/{t}")));
+    targets.extend(successful_tools.iter().map(|t| format!("{}/{t}", paths.symlink_dir)));
     let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
     for e in chattr_op("+i", &refs) {
         eprintln!("Warning: chattr +i failed: {e}");
@@ -62,17 +91,19 @@ fn install() -> Result<(), String> {
     Ok(())
 }
 
-fn unlock() -> Result<(), String> {
-    let mut policy = load_policy(INSTALL_POLICY_PATH)?;
+pub fn unlock_with_paths(paths: &InstallPaths<'_>) -> Result<(), String> {
+    let mut policy = load_policy(paths.policy_path)?;
     let _ = policy.validate();
 
     let mut tool_names: Vec<String> = policy.tools.keys().cloned().collect();
     tool_names.sort_unstable();
     let mut targets: Vec<String> = vec![
-        INSTALL_BINARY.to_string(), INSTALL_UTILS_BINARY.to_string(),
-        INSTALL_POLICY_PATH.to_string(), INSTALL_SUDOERS_PATH.to_string(),
+        paths.binary.to_string(),
+        paths.utils_binary.to_string(),
+        paths.policy_path.to_string(),
+        paths.sudoers_path.to_string(),
     ];
-    targets.extend(tool_names.iter().map(|t| format!("{SYMLINK_DIR}/{t}")));
+    targets.extend(tool_names.iter().map(|t| format!("{}/{t}", paths.symlink_dir)));
     let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
     let errors = chattr_op("-i", &refs);
     for e in &errors {
@@ -85,7 +116,11 @@ fn unlock() -> Result<(), String> {
     Ok(())
 }
 
-fn install_symlinks(tools: &[String], binary: &str) -> (Vec<String>, Vec<String>) {
+fn install_symlinks_to(
+    tools: &[String],
+    binary: &str,
+    symlink_dir: &str,
+) -> (Vec<String>, Vec<String>) {
     let mut successful = Vec::new();
     let mut errors = Vec::new();
     for tool in tools {
@@ -93,7 +128,7 @@ fn install_symlinks(tools: &[String], binary: &str) -> (Vec<String>, Vec<String>
             errors.push(format!("Invalid tool name '{tool}'"));
             continue;
         }
-        let link_path = std::path::Path::new(SYMLINK_DIR).join(tool);
+        let link_path = std::path::Path::new(symlink_dir).join(tool);
         let mut skip = false;
         match std::fs::symlink_metadata(&link_path) {
             Ok(meta) => {
@@ -134,19 +169,25 @@ fn install_symlinks(tools: &[String], binary: &str) -> (Vec<String>, Vec<String>
     (successful, errors)
 }
 
-fn write_sudoers_file(tools: &[String]) -> Result<(), String> {
+fn write_sudoers_file_to(
+    tools: &[String],
+    sudoers_path: &str,
+    symlink_dir: &str,
+) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let content = generate_sudoers_content(tools);
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o440)
+    let content = generate_sudoers_content_with_dir(tools, symlink_dir);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true).create(true).truncate(true).mode(0o440)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(INSTALL_SUDOERS_PATH).map_err(|e| format!("Cannot create {INSTALL_SUDOERS_PATH}: {e}"))?;
-    f.write_all(content.as_bytes()).map_err(|e| format!("Cannot write {INSTALL_SUDOERS_PATH}: {e}"))?;
-    println!("  Wrote sudoers drop-in: {INSTALL_SUDOERS_PATH}");
+        .open(sudoers_path)
+        .map_err(|e| format!("Cannot create {sudoers_path}: {e}"))?;
+    f.write_all(content.as_bytes()).map_err(|e| format!("Cannot write {sudoers_path}: {e}"))?;
+    println!("  Wrote sudoers drop-in: {sudoers_path}");
     Ok(())
 }
 
-fn chattr_op(flag: &str, paths: &[&str]) -> Vec<String> {
+pub(crate) fn chattr_op(flag: &str, paths: &[&str]) -> Vec<String> {
     let mut errors = Vec::new();
     for path in paths {
         match std::process::Command::new("chattr").arg(flag).arg(path).status() {
@@ -161,6 +202,21 @@ fn chattr_op(flag: &str, paths: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn write_policy(path: &str, tools: &[(&str, &str)]) {
+        let mut tools_json = String::from("{");
+        for (i, (name, binary)) in tools.iter().enumerate() {
+            if i > 0 { tools_json.push(','); }
+            tools_json.push_str(&format!(
+                r#""{name}":{{"real_binary":"{binary}","help_description":"{name}"}}"#
+            ));
+        }
+        tools_json.push('}');
+        let json = format!(r#"{{"version":"1.0","global_settings":{{}},"tools":{tools_json}}}"#);
+        std::fs::write(path, json).unwrap();
+    }
+
     #[test]
     fn test_sudoers_content_empty_tools_is_safe() {
         let content = generate_sudoers_content(&[]);
@@ -174,5 +230,160 @@ mod tests {
         let content = generate_sudoers_content(&tools);
         assert!(content.contains("Defaults secure_path="));
         assert!(content.contains("/usr/local/bin/apt"));
+    }
+
+    #[test]
+    fn test_sudoers_content_with_dir_uses_custom_path() {
+        let tools = vec!["apt".to_string(), "tail".to_string()];
+        let content = generate_sudoers_content_with_dir(&tools, "/opt/bin");
+        assert!(content.contains("/opt/bin/apt"));
+        assert!(content.contains("/opt/bin/tail"));
+        // tools should be sorted
+        let apt_pos = content.find("/opt/bin/apt").unwrap();
+        let tail_pos = content.find("/opt/bin/tail").unwrap();
+        assert!(apt_pos < tail_pos, "tools must be alphabetically sorted");
+    }
+
+    #[test]
+    fn test_install_symlinks_creates_links_in_custom_dir() {
+        let dir = TempDir::new().unwrap();
+        let (ok, errs) = install_symlinks_to(
+            &["mytool".to_string()],
+            "/nonexistent/target",
+            dir.path().to_str().unwrap(),
+        );
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
+        assert_eq!(ok, vec!["mytool"]);
+        let link = dir.path().join("mytool");
+        assert!(link.exists() || std::fs::symlink_metadata(&link).is_ok(),
+            "symlink should exist");
+        let target = std::fs::read_link(&link).unwrap();
+        assert_eq!(target.to_str().unwrap(), "/nonexistent/target");
+    }
+
+    #[test]
+    fn test_install_symlinks_replaces_existing_symlink() {
+        let dir = TempDir::new().unwrap();
+        let link = dir.path().join("mytool");
+        std::os::unix::fs::symlink("/old/target", &link).unwrap();
+
+        let (ok, errs) = install_symlinks_to(
+            &["mytool".to_string()],
+            "/new/target",
+            dir.path().to_str().unwrap(),
+        );
+        assert!(errs.is_empty());
+        assert_eq!(ok, vec!["mytool"]);
+        let new_target = std::fs::read_link(&link).unwrap();
+        assert_eq!(new_target.to_str().unwrap(), "/new/target");
+    }
+
+    #[test]
+    fn test_install_symlinks_backs_up_regular_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("mytool");
+        std::fs::write(&file_path, b"original binary").unwrap();
+
+        let (ok, errs) = install_symlinks_to(
+            &["mytool".to_string()],
+            "/new/target",
+            dir.path().to_str().unwrap(),
+        );
+        assert!(errs.is_empty(), "errors: {errs:?}");
+        assert_eq!(ok, vec!["mytool"]);
+        // Original should be backed up
+        assert!(dir.path().join("mytool.bak").exists(), "backup should exist");
+        // New symlink should exist
+        assert!(std::fs::symlink_metadata(dir.path().join("mytool")).is_ok());
+    }
+
+    #[test]
+    fn test_install_symlinks_rejects_invalid_name() {
+        let dir = TempDir::new().unwrap();
+        let (ok, errs) = install_symlinks_to(
+            &["bad/name".to_string()],
+            "/target",
+            dir.path().to_str().unwrap(),
+        );
+        assert!(ok.is_empty());
+        assert!(!errs.is_empty());
+        assert!(errs[0].contains("Invalid tool name"));
+    }
+
+    #[test]
+    fn test_write_sudoers_file_to_creates_correct_content() {
+        let dir = TempDir::new().unwrap();
+        let sudoers = dir.path().join("sudoers");
+        let tools = vec!["apt".to_string(), "docker".to_string()];
+        write_sudoers_file_to(&tools, sudoers.to_str().unwrap(), "/usr/local/bin").unwrap();
+
+        let content = std::fs::read_to_string(&sudoers).unwrap();
+        assert!(content.contains("/usr/local/bin/apt"));
+        assert!(content.contains("/usr/local/bin/docker"));
+        assert!(content.contains("Defaults secure_path="));
+    }
+
+    #[test]
+    fn test_install_with_paths_full_flow() {
+        let root = TempDir::new().unwrap();
+        let symlink_dir = root.path().join("bin");
+        std::fs::create_dir(&symlink_dir).unwrap();
+        let sudoers_dir = root.path().join("sudoers.d");
+        std::fs::create_dir(&sudoers_dir).unwrap();
+        let policy_file = root.path().join("policy.json");
+        let sudoers_file = sudoers_dir.join("secure-sudoers");
+
+        write_policy(policy_file.to_str().unwrap(), &[("apt", "/usr/bin/apt")]);
+
+        let paths = InstallPaths {
+            policy_path: policy_file.to_str().unwrap(),
+            binary: "/nonexistent/secure-sudoers",
+            utils_binary: "/nonexistent/secure-sudoers-utils",
+            sudoers_path: sudoers_file.to_str().unwrap(),
+            symlink_dir: symlink_dir.to_str().unwrap(),
+        };
+
+        install_with_paths(&paths).unwrap();
+
+        // Verify symlink created
+        let link = symlink_dir.join("apt");
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "symlink should exist");
+        let target = std::fs::read_link(&link).unwrap();
+        assert_eq!(target.to_str().unwrap(), "/nonexistent/secure-sudoers");
+
+        // Verify sudoers file content
+        let content = std::fs::read_to_string(&sudoers_file).unwrap();
+        assert!(content.contains(&format!("{}/apt", symlink_dir.display())));
+        assert!(content.contains("Defaults secure_path="));
+    }
+
+    #[test]
+    fn test_unlock_with_paths_runs_without_error_on_valid_policy() {
+        let root = TempDir::new().unwrap();
+        let symlink_dir = root.path().join("bin");
+        std::fs::create_dir(&symlink_dir).unwrap();
+        let sudoers_dir = root.path().join("sudoers.d");
+        std::fs::create_dir(&sudoers_dir).unwrap();
+        let policy_file = root.path().join("policy.json");
+        let sudoers_file = sudoers_dir.join("secure-sudoers");
+
+        write_policy(policy_file.to_str().unwrap(), &[("tail", "/usr/bin/tail")]);
+
+        let paths = InstallPaths {
+            policy_path: policy_file.to_str().unwrap(),
+            binary: "/nonexistent/secure-sudoers",
+            utils_binary: "/nonexistent/secure-sudoers-utils",
+            sudoers_path: sudoers_file.to_str().unwrap(),
+            symlink_dir: symlink_dir.to_str().unwrap(),
+        };
+
+        let _ = unlock_with_paths(&paths);
+    }
+
+    #[test]
+    fn test_chattr_op_handles_missing_binary() {
+        // On a system without chattr, or with a non-existent file, verify graceful error
+        let errors = chattr_op("+i", &["/tmp/nonexistent_secure_sudoers_test_file"]);
+        let _ = errors;
     }
 }

@@ -18,6 +18,19 @@ impl ValidatedCommand {
     pub fn env_whitelist(&self) -> &[String] { &self.env_whitelist }
 }
 
+#[cfg(feature = "testing")]
+impl ValidatedCommand {
+    /// Construct a `ValidatedCommand` directly for use in tests.
+    pub fn new_for_testing(
+        binary: &str,
+        args: Vec<String>,
+        isolation: crate::models::IsolationSettings,
+        env_whitelist: Vec<String>,
+    ) -> Self {
+        ValidatedCommand { binary: binary.to_string(), args, isolation, env_whitelist }
+    }
+}
+
 pub fn validate_command(
     policy: &SecureSudoersPolicy,
     tool_name: &str,
