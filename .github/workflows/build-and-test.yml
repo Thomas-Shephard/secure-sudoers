@@ -1,0 +1,71 @@
+# Continuous Integration — runs on every push and pull_request to main.
+#
+# All jobs run on ubuntu-latest because:
+#   • the `nix` crate only provides Linux kernel interfaces (namespaces, mounts)
+#   • PTY tests require a real Linux kernel
+#   • the final release target is Linux anyway
+name: Build and Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: never   # clean output in CI logs
+  RUSTFLAGS: "-D warnings"  # treat compiler warnings as errors
+
+jobs:
+  # ── Format + Clippy ──────────────────────────────────────────────────────────
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain with rustfmt + clippy
+        run: rustup toolchain install stable --component rustfmt,clippy --no-self-update
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ── Tests ────────────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --no-self-update
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Run tests (all features)
+        run: cargo test --workspace --all-features

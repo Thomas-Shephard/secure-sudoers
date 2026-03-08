@@ -1,0 +1,75 @@
+use secure_sudoers_common::models::SecureSudoersPolicy;
+use secure_sudoers_common::validator::ValidatedCommand;
+use nix::unistd::fexecve;
+use std::ffi::CString;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+
+pub fn execute_securely(cmd: &ValidatedCommand, policy: &SecureSudoersPolicy) -> Result<(), String> {
+    let binary_file = std::fs::OpenOptions::new()
+        .read(true).custom_flags(libc::O_CLOEXEC).open(cmd.binary())
+        .map_err(|e| format!("Failed to open binary '{}': {e}", cmd.binary()))?;
+
+    let clean_env = build_scrubbed_env(cmd.env_whitelist());
+
+    crate::isolation::setup_isolation(
+        cmd.isolation(),
+        &policy.global_settings.blocked_paths,
+        cmd.binary(),
+        cmd.args(),
+    )
+    .map_err(|e| format!("Isolation setup failed: {e}"))?;
+
+    crate::isolation::drop_capabilities().map_err(|e| format!("Capability drop failed: {e}"))?;
+
+    let binary_name = Path::new(cmd.binary()).file_name().and_then(|n| n.to_str()).unwrap_or(cmd.binary());
+    let mut argv: Vec<CString> = Vec::with_capacity(1 + cmd.args().len());
+    argv.push(CString::new(binary_name).map_err(|e| format!("Binary name contains NUL byte: {e}"))?);
+    for arg in cmd.args() {
+        argv.push(CString::new(arg.as_str()).map_err(|e| format!("Argument '{arg}' contains NUL byte: {e}"))?);
+    }
+
+    let envp: Result<Vec<CString>, String> = clean_env.iter()
+        .map(|(k, v)| CString::new(format!("{k}={v}")).map_err(|e| format!("Env var '{k}' contains NUL byte: {e}")))
+        .collect();
+    let envp = envp?;
+
+    match fexecve(&binary_file, &argv, &envp) {
+        Ok(infallible) => match infallible {},
+        Err(e) => Err(format!("fexecve failed: {e}")),
+    }
+}
+
+pub fn build_scrubbed_env(whitelist: &[String]) -> Vec<(String, String)> {
+    std::env::vars().filter(|(key, _)| whitelist.contains(key)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    fn wl(keys: &[&str]) -> Vec<String> { keys.iter().map(|s| s.to_string()).collect() }
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    fn with_env<F: FnOnce()>(pairs: &[(&str, &str)], f: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for (k, v) in pairs { unsafe { std::env::set_var(k, v); } }
+        f();
+        for (k, _) in pairs { unsafe { std::env::remove_var(k); } }
+    }
+
+    #[test]
+    fn test_whitelisted_var_is_kept() {
+        with_env(&[("TERM", "xterm")], || {
+            let env = build_scrubbed_env(&wl(&["TERM"]));
+            assert!(env.iter().any(|(k, _)| k == "TERM"));
+        });
+    }
+
+    #[test]
+    fn test_ld_preload_is_stripped() {
+        with_env(&[("LD_PRELOAD", "evil.so"), ("TERM", "xterm")], || {
+            let env = build_scrubbed_env(&wl(&["TERM"]));
+            assert!(!env.iter().any(|(k, _)| k == "LD_PRELOAD"));
+        });
+    }
+}

@@ -1,0 +1,96 @@
+.TH SECURE-SUDOERS 1 "March 2026" "secure-sudoers 0.1.0" "User Commands"
+.SH NAME
+secure-sudoers \- A memory-safe, high-security gatekeeper for sudo
+.SH SYNOPSIS
+.B secure-sudoers
+[\fITOOL\fR] [\fIARGS\fR...]
+.SH DESCRIPTION
+.B secure-sudoers
+is a security-hardened delegation tool designed to be used as a replacement for direct sudo access. It enforces strict JSON-defined policies, isolates processes using Linux namespaces, and prevents TOCTOU (Time-of-Check to Time-of-Use) attacks.
+.PP
+The tool is strictly Linux-only and relies on kernel features like namespaces and capability dropping to ensure that even if a delegated tool is compromised, the impact on the host system is minimized.
+.SH INVOCATION
+The tool supports two invocation styles:
+.TP
+.B 1. Symlink Invocation
+When invoked via a symlink (e.g., \fI/usr/local/bin/apt\fR -> \fI/usr/local/bin/secure-sudoers\fR), it uses the symlink's name as the tool to look up in the policy. This allows for a transparent user experience where delegated tools can be run normally.
+.TP
+.B 2. Direct Invocation
+When invoked directly as \fBsecure-sudoers\fR, the first argument is treated as the tool name, and subsequent arguments are passed to that tool after validation.
+.SH POLICY FORMAT
+The central policy is a JSON file, typically located at \fI/etc/secure-sudoers/policy.json\fR.
+.SS Global Settings
+.TP
+.B log_destination
+"syslog" or "stdout".
+.TP
+.B admin_contact
+A message to display to users when access is denied.
+.TP
+.B safe_arg_regex
+A regex that all positional arguments must match unless they are specifically validated as paths.
+.TP
+.B blocked_paths
+A list of absolute paths that are blocked globally (e.g., /etc/shadow, /root).
+.SS Tool Policies
+Each tool entry defines:
+.TP
+.B real_binary
+The absolute path to the actual binary to execute.
+.TP
+.B verbs
+A list of allowed subcommands (e.g., "install", "update").
+.TP
+.B flags
+Allowed simple flags (e.g., "-y", "--quiet").
+.TP
+.B flags_with_args
+Flags that require a simple string argument.
+.TP
+.B flags_with_path_args
+Flags that require a path argument (subject to \fBblocked_paths\fR checks).
+.TP
+.B flag_rules
+Complex rules for flag arguments (regex, list of constants, or combined).
+.TP
+.B isolation
+Namespace and mount settings specific to this tool.
+.SH SECURITY
+.TP
+.B 1. Signature Verification
+The policy file MUST have a valid detached Ed25519 signature at \fIPOLICY_PATH.sig\fR. The signature is verified against the public key at \fI/etc/secure-sudoers/secure_sudoers_public_key.pem\fR.
+.TP
+.B 2. Namespace Isolation
+Child processes are unshared from the host namespaces (Mount, Network, PID, IPC, UTS) as configured in the policy.
+.TP
+.B 3. Capability Dropping
+All "dangerous" Linux capabilities (e.g., CAP_SYS_ADMIN, CAP_DAC_OVERRIDE) are dropped before the binary is executed via \fBfexecve\fR(2).
+.SH ENVIRONMENT
+.TP
+.B SECURE_SUDOERS_POLICY_PATH
+Override the default policy location. Only available in debug builds.
+.TP
+.B SUDO_USER
+Used for audit logging to identify the original user who invoked the tool.
+.SH EXIT STATUS
+.TP
+.B 1
+Fatal error (e.g., policy load failure, access denied, security violation).
+.TP
+.B 0 or Tool Exit Code
+The exit code returned by the executed tool on success or failure.
+.SH FILES
+.TP
+.I /etc/secure-sudoers/policy.json
+The central security policy.
+.TP
+.I /etc/secure-sudoers/policy.json.sig
+The Ed25519 signature for the policy.
+.TP
+.I /etc/secure-sudoers/secure_sudoers_public_key.pem
+The public key used for verification.
+.SH AUTHOR
+Secure Sudoers Contributors <security@example.com>
+.SH SEE ALSO
+.BR secure-sudoers-utils (1),
+.BR sudo (8)
