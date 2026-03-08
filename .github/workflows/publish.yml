@@ -55,44 +55,48 @@ jobs:
       - name: Install system packages
         if: matrix.apt_pkgs != ''
         run: sudo apt-get update -qq && sudo apt-get install -y ${{ matrix.apt_pkgs }}
+      - name: Set up swap space
+        run: |
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
       - name: Install Zig
         if: matrix.use_zigbuild
         uses: goto-bus-stop/setup-zig@v2
-      - name: Install cargo-zigbuild
-        if: matrix.use_zigbuild
-        run: cargo install cargo-zigbuild --locked
-      - name: Configure cross-linker
-        if: matrix.linker != ''
-        run: |
-          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')
-          echo "CARGO_TARGET_${TARGET_UPPER}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
-          echo "CC_${TARGET_UPPER}=${{ matrix.linker }}" >> "$GITHUB_ENV"
-      - name: Cache Cargo registry
+      - name: Cache Cargo and Zig
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
+            ~/.cache/zig
             target
-          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-release-${{ matrix.target }}-
+      - name: Configure cross-linker
+        if: matrix.linker != ''
+        run: |
+          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')
+          echo "CARGO_TARGET_${TARGET_UPPER}_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
+          echo "CC_${TARGET_UPPER}=${{ matrix.linker }}" >> "$GITHUB_ENV"
       - name: Build (cargo)
         if: "!matrix.use_zigbuild"
         run: |
-          cargo build \
-            --workspace \
-            --release \
-            --features network-update \
-            --target ${{ matrix.target }}
+          cargo build -p secure-sudoers --release --target ${{ matrix.target }} --verbose
+          cargo build -p secure-sudoers-utils --release --features network-update --target ${{ matrix.target }} --verbose
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
       - name: Build (cargo-zigbuild)
         if: matrix.use_zigbuild
         run: |
-          cargo zigbuild \
-            --workspace \
-            --release \
-            --features network-update \
-            --target ${{ matrix.target }}
+          cargo install cargo-zigbuild --locked
+          cargo zigbuild -p secure-sudoers --release --target ${{ matrix.target }} --verbose
+          cargo zigbuild -p secure-sudoers-utils --release --features network-update --target ${{ matrix.target }} --verbose
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
       - name: Stage binaries
         run: |
           mkdir -p dist
