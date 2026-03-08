@@ -17,10 +17,16 @@ pub fn parse_invocation(raw_argv: &[String]) -> (String, Vec<String>) {
 }
 
 pub fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
-    load_policy_with_pubkey(path, PUBLIC_KEY_PATH)
+    // In debug builds, allow SECURE_SUDOERS_PUBKEY_PATH to redirect the key
+    #[cfg(debug_assertions)]
+    let pubkey_path = std::env::var("SECURE_SUDOERS_PUBKEY_PATH")
+        .unwrap_or_else(|_| PUBLIC_KEY_PATH.to_string());
+    #[cfg(not(debug_assertions))]
+    let pubkey_path = PUBLIC_KEY_PATH.to_string();
+    load_policy_with_pubkey(path, &pubkey_path)
 }
 
-fn load_policy_with_pubkey(path: &str, pubkey_path: &str) -> Result<SecureSudoersPolicy, String> {
+pub(crate) fn load_policy_with_pubkey(path: &str, pubkey_path: &str) -> Result<SecureSudoersPolicy, String> {
     let policy_bytes = std::fs::read(path).map_err(|e| format!("Failed to read policy {path}: {e}"))?;
     
     let pubkey_bytes = secure_sudoers_common::util::read_pem_bytes(pubkey_path, "SECURE SUDOERS PUBLIC KEY")

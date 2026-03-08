@@ -266,3 +266,42 @@ mod tests {
         assert!(validate_command(&p, "ls", args(&["/etc"])).is_err());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::testing::fixtures::make_policy;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        /// The validator must never panic regardless of the tool name.
+        #[test]
+        fn validator_never_panics_random_tool(
+            tool in ".*",
+            args in proptest::collection::vec(".*", 0..=4),
+        ) {
+            let policy = make_policy();
+            let _ = validate_command(&policy, &tool, args);
+        }
+
+        /// With a known-valid tool, arbitrary args must not cause panics.
+        #[test]
+        fn validator_apt_random_args_no_panic(
+            args in proptest::collection::vec(any::<String>(), 0..=4),
+        ) {
+            let policy = make_policy();
+            let _ = validate_command(&policy, "apt", args);
+        }
+
+        /// Path-validating tool (tail) with arbitrary args must not panic.
+        #[test]
+        fn validator_tail_random_path_args_no_panic(
+            args in proptest::collection::vec(any::<String>(), 0..=4),
+        ) {
+            let policy = make_policy();
+            let _ = validate_command(&policy, "tail", args);
+        }
+    }
+}

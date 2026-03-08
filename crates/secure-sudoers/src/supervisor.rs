@@ -121,3 +121,120 @@ fn parent_loop(master: OwnedFd, child: Pid) -> Result<i32, String> {
         _ => Ok(0),
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::sys::wait::{waitpid, WaitStatus};
+    use nix::unistd::{fork, ForkResult};
+    use secure_sudoers_common::models::IsolationSettings;
+    use secure_sudoers_common::testing::fixtures::make_policy;
+    use secure_sudoers_common::validator::ValidatedCommand;
+
+    macro_rules! require_root {
+        () => {
+            if unsafe { libc::getuid() } != 0 {
+                eprintln!("  [SKIP] test requires root");
+                return;
+            }
+        };
+    }
+
+    unsafe fn in_fork(child_fn: impl FnOnce() -> bool) -> bool {
+        match unsafe { fork().expect("fork failed") } {
+            ForkResult::Child => {
+                let ok = child_fn();
+                std::process::exit(if ok { 0 } else { 1 });
+            }
+            ForkResult::Parent { child } => match waitpid(child, None).expect("waitpid") {
+                WaitStatus::Exited(_, 0) => true,
+                WaitStatus::Exited(_, code) => {
+                    eprintln!("  child exited with code {code}");
+                    false
+                }
+                other => {
+                    eprintln!("  unexpected child status: {other:?}");
+                    false
+                }
+            },
+        }
+    }
+
+    /// Directly invoke the signal handler and verify the atomic flag is set.
+    /// This covers the `sigwinch_handler` function body.
+    #[test]
+    fn test_sigwinch_handler_sets_flag() {
+        use std::sync::atomic::Ordering;
+        SIGWINCH_RECEIVED.store(false, Ordering::SeqCst);
+        sigwinch_handler(libc::SIGWINCH);
+        assert!(SIGWINCH_RECEIVED.load(Ordering::SeqCst));
+        SIGWINCH_RECEIVED.store(false, Ordering::SeqCst);
+    }
+
+    /// Run the supervisor with stdin bound to a PTY slave so that
+    /// `stdin_is_tty = true`, covering: tcgetattr, cfmakeraw, tcsetattr,
+    /// SIGWINCH signal installation, forward_winsize, and TerminalGuard::drop.
+    /// Pre-seeding SIGWINCH_RECEIVED also covers the swap-and-forward branch.
+    #[test]
+    fn test_supervisor_tty_stdin_covers_raw_mode_and_winch() {
+        require_root!();
+
+        let ok = unsafe {
+            in_fork(|| {
+                // Allocate a PTY pair; make the slave our stdin/stdout so
+                // isatty(STDIN_FILENO) returns 1 inside run_supervisor.
+                let mut master_raw: libc::c_int = -1;
+                let mut slave_raw: libc::c_int = -1;
+                let ret = libc::openpty(
+                    &mut master_raw,
+                    &mut slave_raw,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+                if ret != 0 {
+                    eprintln!("  openpty failed: {}", std::io::Error::last_os_error());
+                    return false;
+                }
+
+                if libc::dup2(slave_raw, libc::STDIN_FILENO) < 0
+                    || libc::dup2(slave_raw, libc::STDOUT_FILENO) < 0
+                {
+                    eprintln!("  dup2 failed");
+                    return false;
+                }
+                libc::close(slave_raw);
+
+                // Pre-seed the SIGWINCH flag so the first loop iteration
+                // exercises the forward_winsize-on-signal path.
+                SIGWINCH_RECEIVED.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                let policy = make_policy();
+                let cmd = ValidatedCommand::new_for_testing(
+                    "/usr/bin/true",
+                    vec![],
+                    IsolationSettings::default(),
+                    vec![],
+                );
+
+                let result = run_supervisor(&cmd, &policy);
+                libc::close(master_raw);
+                match result {
+                    Ok(code) => {
+                        if code != 0 {
+                            eprintln!("  /usr/bin/true exited {code}");
+                        }
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("  supervisor failed: {e}");
+                        false
+                    }
+                }
+            })
+        };
+
+        assert!(ok, "supervisor TTY mode with SIGWINCH should succeed");
+    }
+}
