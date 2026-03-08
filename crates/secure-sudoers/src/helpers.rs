@@ -68,7 +68,12 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
                     let flag_char = s_flag.chars().nth(1).unwrap();
                     if arg.starts_with('-') && !arg.starts_with("--") {
                         if let Some(pos) = arg.find(flag_char) {
-                            redacted.push(format!("{}[REDACTED]", &arg[..pos + 1]));
+                            if pos < arg.len() - 1 {
+                                redacted.push(format!("{}[REDACTED]", &arg[..pos + 1]));
+                            } else {
+                                redacted.push(arg.clone());
+                                skip_next = true;
+                            }
                             attached_found = true;
                             break;
                         }
@@ -115,6 +120,18 @@ mod tests {
     use super::*;
     use secure_sudoers_common::testing::fixtures::{args as argv, make_policy};
     use secure_sudoers_common::models::UnauthorizedAuditMode;
+
+    #[test]
+    fn test_redact_args_clustered_with_separate_value() {
+        let mut policy = make_policy();
+        if let Some(tool) = policy.tools.get_mut("apt") {
+            tool.sensitive_flags.push("-p".to_string());
+        }
+        let args = argv(&["install", "-vp", "secret", "curl"]);
+        let redacted = redact_args(&args, &policy, "apt");
+        // -vp is kept as is (it's the flag cluster), but secret must be redacted
+        assert_eq!(redacted, argv(&["install", "-vp", "[REDACTED]", "curl"]));
+    }
 
     #[test]
     fn test_redact_args_clustered_short_flag() {
