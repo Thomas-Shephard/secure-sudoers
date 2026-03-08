@@ -29,7 +29,7 @@ jobs:
         run: rustup toolchain install stable --component rustfmt,clippy --no-self-update
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index
@@ -57,7 +57,7 @@ jobs:
         run: rustup toolchain install stable --no-self-update
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index

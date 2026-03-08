@@ -69,7 +69,7 @@ jobs:
           echo "CC_${TARGET_UPPER}=${{ matrix.linker }}" >> "$GITHUB_ENV"
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index
