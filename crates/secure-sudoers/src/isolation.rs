@@ -1,6 +1,6 @@
 use nix::mount::{MsFlags, mount};
 use nix::sched::{CloneFlags, unshare};
-use secure_sudoers_common::models::IsolationSettings;
+use secure_sudoers_common::models::{IsolationSettings, ValidationContext};
 
 pub fn setup_isolation(
     settings: &IsolationSettings,
@@ -26,7 +26,7 @@ pub fn setup_isolation(
 }
 
 fn validate_path_isolated(path_str: &str, blocked_paths: &[String]) -> Result<(), String> {
-    secure_sudoers_common::fs::check_path(path_str, "isolated", blocked_paths).map(|_| ())
+    secure_sudoers_common::fs::check_path(path_str, &ValidationContext::Positional, blocked_paths).map(|_| ())
 }
 
 fn apply_blocked_paths(paths: &[String]) -> Result<(), String> {

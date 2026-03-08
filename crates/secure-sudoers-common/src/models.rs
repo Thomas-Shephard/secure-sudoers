@@ -144,6 +144,23 @@ pub struct SecureSudoersPolicy {
     pub tools: HashMap<String, ToolPolicy>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidationContext {
+    Positional,
+    DelimitedPositional,
+    Flag(String),
+}
+
+impl std::fmt::Display for ValidationContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationContext::Positional => write!(f, "positional"),
+            ValidationContext::DelimitedPositional => write!(f, "delimited positional"),
+            ValidationContext::Flag(s) => write!(f, "flag '{}'", s),
+        }
+    }
+}
+
 pub fn is_valid_tool_name(name: &str) -> bool {
     !(name.is_empty() || name == "." || name == ".." || name.contains('/')
         || name.contains('\0') || name.contains(',') || name.chars().any(|c| c.is_whitespace()))

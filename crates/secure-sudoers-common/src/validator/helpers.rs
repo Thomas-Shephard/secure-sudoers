@@ -1,4 +1,4 @@
-use crate::models::FlagRule;
+use crate::models::{FlagRule, ValidationContext};
 use crate::fs::check_path;
 use regex::Regex;
 use std::collections::HashMap;
@@ -102,7 +102,8 @@ fn process_flag_with_value(
         }
 
         if is_path_flag {
-            let canonical = check_path(&val, flag, blocked_paths)?;
+            let context = ValidationContext::Flag(flag.to_string());
+            let canonical = check_path(&val, &context, blocked_paths)?;
             out.push(flag.to_string());
             out.push(canonical);
         } else {
@@ -117,6 +118,7 @@ fn process_flag_with_value(
 pub fn push_positional(
     arg: String,
     tool_name: &str,
+    context: &ValidationContext,
     disallowed: &[String],
     safe_re: &Regex,
     validate_as_path: bool,
@@ -129,8 +131,12 @@ pub fn push_positional(
     if !safe_re.is_match(&arg) {
         return Err(format!("Positional argument '{}' contains illegal characters", arg));
     }
+    if arg.starts_with('-') && arg.len() > 1 && !validate_as_path {
+        return Err(format!("Security failure: illegal flag-like positional argument '{}' in '{}' context", arg, context));
+    }
+
     if validate_as_path {
-        let canonical = check_path(&arg, "positional", blocked_paths)?;
+        let canonical = check_path(&arg, context, blocked_paths)?;
         out.push(canonical);
     } else {
         out.push(arg);

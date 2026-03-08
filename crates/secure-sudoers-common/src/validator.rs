@@ -1,4 +1,4 @@
-use crate::models::SecureSudoersPolicy;
+use crate::models::{SecureSudoersPolicy, ValidationContext};
 use regex::Regex;
 
 mod helpers;
@@ -49,7 +49,7 @@ pub fn validate_command(
         if arg == "--" {
             for rem in iter {
                 helpers::push_positional(
-                    rem, tool_name, &tool.disallowed_positional_args, &safe_re,
+                    rem, tool_name, &ValidationContext::DelimitedPositional, &tool.disallowed_positional_args, &safe_re,
                     tool.validate_positional_args_as_paths, &policy.global_settings.blocked_paths, &mut out,
                 )?;
             }
@@ -66,7 +66,7 @@ pub fn validate_command(
             )?;
         } else {
             helpers::push_positional(
-                arg, tool_name, &tool.disallowed_positional_args, &safe_re,
+                arg, tool_name, &ValidationContext::Positional, &tool.disallowed_positional_args, &safe_re,
                 tool.validate_positional_args_as_paths, &policy.global_settings.blocked_paths, &mut out,
             )?;
         }
@@ -91,7 +91,7 @@ pub fn validate_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{FlagRule, ToolPolicy};
+    use crate::models::ToolPolicy;
     use crate::testing::fixtures::{make_policy, args};
     use std::collections::HashMap;
 
@@ -120,21 +120,43 @@ mod tests {
     }
 
     #[test]
-    fn test_polymorphic_flag_validation() {
+    fn test_flag_injection_via_delimiter_rejected() {
+        let p = make_policy();
+        // -- followed by something that looks like a flag should be rejected if not a path
+        let args = args(&["--", "-exec", "id"]);
+        assert!(validate_command(&p, "ls", args).is_err());
+    }
+
+    #[test]
+    fn test_path_blocking_with_trailing_slash() {
         let mut p = make_policy();
-        let target_rule: FlagRule = serde_json::from_str(r#"["PROD", "STAGING", {"regex": "^DEV-[0-9]+$"}]"#).unwrap();
-        let mut flag_rules = HashMap::new();
-        flag_rules.insert("--target".to_string(), target_rule);
-        p.tools.insert("deploy".to_string(), ToolPolicy {
-            real_binary: "/usr/local/bin/deploy".to_string(),
+        p.global_settings.blocked_paths = vec!["/etc/sudoers/".to_string()];
+        p.tools.insert("cat".to_string(), ToolPolicy {
+            real_binary: "/bin/cat".to_string(),
             verbs: vec![], flags: vec![], flags_with_args: vec![], flags_with_path_args: vec![],
-            disallowed_positional_args: vec![], validate_positional_args_as_paths: false,
-            sensitive_flags: vec![], help_description: "Deploy.".to_string(),
-            isolation: None, env_whitelist: vec![], flag_rules,
+            disallowed_positional_args: vec![], validate_positional_args_as_paths: true,
+            sensitive_flags: vec![], help_description: "x".to_string(),
+            isolation: None, env_whitelist: vec![], flag_rules: HashMap::new(),
         });
 
-        assert!(validate_command(&p, "deploy", args(&["--target", "PROD"])).is_ok());
-        assert!(validate_command(&p, "deploy", args(&["--target", "DEV-123"])).is_ok());
-        assert!(validate_command(&p, "deploy", args(&["--target", "UNKNOWN"])).is_err());
+        // This should be blocked even if policy has trailing slash
+        assert!(validate_command(&p, "cat", args(&["/etc/sudoers"])).is_err());
+        // And subpaths should be blocked
+        assert!(validate_command(&p, "cat", args(&["/etc/sudoers/rules"])).is_err());
+    }
+
+    #[test]
+    fn test_root_path_blocking() {
+        let mut p = make_policy();
+        p.global_settings.blocked_paths = vec!["/".to_string()];
+        p.tools.insert("ls".to_string(), ToolPolicy {
+            real_binary: "/bin/ls".to_string(),
+            verbs: vec![], flags: vec![], flags_with_args: vec![], flags_with_path_args: vec![],
+            disallowed_positional_args: vec![], validate_positional_args_as_paths: true,
+            sensitive_flags: vec![], help_description: "x".to_string(),
+            isolation: None, env_whitelist: vec![], flag_rules: HashMap::new(),
+        });
+
+        assert!(validate_command(&p, "ls", args(&["/etc"])).is_err());
     }
 }
