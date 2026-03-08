@@ -214,6 +214,7 @@ impl SecureSudoersPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_unknown_field_in_policy_rejected() {
@@ -225,5 +226,159 @@ mod tests {
     fn test_typo_in_isolation_settings_rejected() {
         let json = r#"{ "version": "1.0", "global_settings": {}, "tools": { "apt": { "real_binary": "/usr/bin/apt", "help_description": "x", "isolation": { "unshare_netwrk": true } } } }"#;
         assert!(serde_json::from_str::<SecureSudoersPolicy>(json).is_err());
+    }
+
+    #[test]
+    fn test_is_valid_tool_name() {
+        // Valid names
+        assert!(is_valid_tool_name("apt"));
+        assert!(is_valid_tool_name("docker-compose"));
+        assert!(is_valid_tool_name("my_tool"));
+        assert!(is_valid_tool_name("tool123"));
+        assert!(is_valid_tool_name("a"));
+
+        // Invalid names
+        assert!(!is_valid_tool_name(""), "empty string should be invalid");
+        assert!(!is_valid_tool_name("."), ". should be invalid");
+        assert!(!is_valid_tool_name(".."), ".. should be invalid");
+        assert!(!is_valid_tool_name("my/tool"), "slash should be invalid");
+        assert!(!is_valid_tool_name("tool\0name"), "null byte should be invalid");
+        assert!(!is_valid_tool_name("tool,name"), "comma should be invalid");
+        assert!(!is_valid_tool_name("tool name"), "space should be invalid");
+        assert!(!is_valid_tool_name("tool\ttab"), "tab should be invalid");
+        assert!(!is_valid_tool_name("tool\nnewline"), "newline should be invalid");
+    }
+
+    #[test]
+    fn test_flag_rule_matches_constant() {
+        // A specific constant only matches itself
+        let rule = FlagRule::Constant("debug".to_string());
+        assert!(rule.matches("debug"), "exact match should succeed");
+        assert!(!rule.matches("any"), "non-matching value should fail");
+        assert!(!rule.matches("release"), "non-matching value should fail");
+        assert!(!rule.matches(""), "empty string should fail");
+
+        // The special constant "any" acts as a wildcard and matches everything
+        let any_rule = FlagRule::Constant("any".to_string());
+        assert!(any_rule.matches("debug"), "'any' rule must match arbitrary args");
+        assert!(any_rule.matches("release"), "'any' rule must match arbitrary args");
+        assert!(any_rule.matches(""), "'any' rule must match empty arg");
+    }
+
+    #[test]
+    fn test_flag_rule_matches_list() {
+        let rule = FlagRule::List(vec![
+            FlagRule::Constant("one".to_string()),
+            FlagRule::Constant("two".to_string()),
+        ]);
+        assert!(rule.matches("one"));
+        assert!(rule.matches("two"));
+        assert!(!rule.matches("three"));
+        assert!(!rule.matches(""));
+    }
+
+    #[test]
+    fn test_flag_rule_matches_regex() {
+        let rule = FlagRule::Regex { regex: r"^\d+$".to_string() };
+        assert!(rule.matches("123"));
+        assert!(rule.matches("0"));
+        assert!(!rule.matches("abc"));
+        assert!(!rule.matches("12a"));
+        assert!(!rule.matches(""));
+    }
+
+    #[test]
+    fn test_flag_rule_matches_invalid_regex_returns_false() {
+        // Invalid regex must not panic; it should return false
+        let rule = FlagRule::Regex { regex: "[unclosed".to_string() };
+        assert!(!rule.matches("anything"), "invalid regex should return false, not panic");
+    }
+
+    fn make_valid_policy() -> SecureSudoersPolicy {
+        SecureSudoersPolicy {
+            version: "1.0".to_string(),
+            serial: 1,
+            global_settings: GlobalSettings {
+                log_destination: "syslog".to_string(),
+                log_format: "text".to_string(),
+                admin_contact: "contact admin".to_string(),
+                safe_arg_regex: r"^[a-zA-Z0-9._+\-=:,@/]+$".to_string(),
+                common_env_whitelist: vec![],
+                dry_run: false,
+                blocked_paths: vec!["/etc/shadow".to_string()],
+                bypass_groups: vec![],
+                unauthorized_audit_mode: UnauthorizedAuditMode::Minimal,
+                default_isolation: None,
+            },
+            tools: HashMap::new(),
+        }
+    }
+
+    fn make_tool(real_binary: &str) -> ToolPolicy {
+        ToolPolicy {
+            real_binary: real_binary.to_string(),
+            verbs: vec![],
+            flags: vec![],
+            flags_with_args: vec![],
+            flags_with_path_args: vec![],
+            disallowed_positional_args: vec![],
+            validate_positional_args_as_paths: true,
+            help_description: "test tool".to_string(),
+            isolation: None,
+            env_whitelist: vec![],
+            sensitive_flags: vec![],
+            flag_rules: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_policy_validate_ok() {
+        let mut p = make_valid_policy();
+        assert!(p.validate().is_ok(), "baseline valid policy must pass validation");
+    }
+
+    #[test]
+    fn test_policy_validate_invalid_safe_arg_regex() {
+        let mut p = make_valid_policy();
+        p.global_settings.safe_arg_regex = "[unclosed bracket".to_string();
+        let err = p.validate().unwrap_err();
+        assert!(err.contains("Invalid regex in safe_arg_regex"), "got: {err}");
+    }
+
+    #[test]
+    fn test_policy_validate_relative_blocked_path() {
+        let mut p = make_valid_policy();
+        p.global_settings.blocked_paths = vec!["etc/shadow".to_string()];
+        let err = p.validate().unwrap_err();
+        assert!(err.contains("Blocked path must be absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn test_policy_validate_invalid_tool_name() {
+        let mut p = make_valid_policy();
+        p.tools.insert("bad/name".to_string(), make_tool("/usr/bin/tool"));
+        let err = p.validate().unwrap_err();
+        assert!(err.contains("Invalid tool name"), "got: {err}");
+    }
+
+    #[test]
+    fn test_policy_validate_relative_real_binary() {
+        let mut p = make_valid_policy();
+        p.tools.insert("mytool".to_string(), make_tool("bin/ls"));
+        let err = p.validate().unwrap_err();
+        assert!(err.contains("must be an absolute path"), "got: {err}");
+    }
+
+    #[test]
+    fn test_policy_validate_invalid_flag_rule_regex() {
+        let mut p = make_valid_policy();
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.flag_rules.insert(
+            "--format".to_string(),
+            FlagRule::Regex { regex: "[unclosed".to_string() },
+        );
+        p.tools.insert("mytool".to_string(), tool);
+        let err = p.validate().unwrap_err();
+        assert!(err.contains("Invalid regex"), "got: {err}");
     }
 }
