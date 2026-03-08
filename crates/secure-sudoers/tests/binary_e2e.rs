@@ -9,6 +9,7 @@ fn ss_cmd() -> Command {
     Command::new(env!("CARGO_BIN_EXE_secure-sudoers"))
 }
 
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use rand_core::OsRng;
 use tempfile::TempDir;
@@ -117,4 +118,44 @@ fn test_binary_direct_invocation_denied_tool() {
         .assert()
         .failure()
         .stderr(contains("Access denied"));
+}
+
+/// A policy with `apt` allowed but `--password` as a sensitive flag.
+/// Running `apt install --password=SECRET` must log `[REDACTED]` to stdout
+/// and must NEVER expose the raw secret value in the audit trail.
+#[test]
+fn test_redaction_in_stdout_log() {
+    let dir = TempDir::new().unwrap();
+    let (sk, vk_bytes) = generate_keypair();
+    let pubkey_path = write_pubkey_pem(&dir, &vk_bytes);
+
+    let policy_json = r#"{
+      "version": "1.0",
+      "serial": 1,
+      "global_settings": {
+        "log_destination": "stdout",
+        "log_format": "text",
+        "admin_contact": "Contact: security@example.com"
+      },
+      "tools": {
+        "apt": {
+          "real_binary": "/bin/true",
+          "help_description": "apt package manager (test stub)",
+          "verbs": ["install"],
+          "flags": [],
+          "flags_with_args": ["--password"],
+          "sensitive_flags": ["--password"]
+        }
+      }
+    }"#;
+
+    let policy_path = write_signed_policy(&dir, policy_json, &sk);
+
+    ss_cmd()
+        .env("SECURE_SUDOERS_POLICY_PATH", &policy_path)
+        .env("SECURE_SUDOERS_PUBKEY_PATH", &pubkey_path)
+        .args(["apt", "install", "--password=SECRET"])
+        .assert()
+        .stdout(contains("[REDACTED]"))
+        .stdout(contains("SECRET").not());
 }
