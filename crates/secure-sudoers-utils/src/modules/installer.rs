@@ -15,6 +15,9 @@ pub fn cmd_unlock() -> Result<(), String> {
 }
 
 pub fn generate_sudoers_content(tools: &[String]) -> String {
+    if tools.is_empty() {
+        return "# No tools authorized in policy. This file is intentionally empty.\n".to_string();
+    }
     let mut sorted: Vec<&str> = tools.iter().map(String::as_str).collect();
     sorted.sort_unstable();
     let paths: Vec<String> = sorted.iter().map(|t| format!("{SYMLINK_DIR}/{t}")).collect();
@@ -158,6 +161,13 @@ fn chattr_op(flag: &str, paths: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_sudoers_content_empty_tools_is_safe() {
+        let content = generate_sudoers_content(&[]);
+        assert!(content.contains("No tools authorized"));
+        assert!(!content.contains("ALL ALL="));
+    }
+
     #[test]
     fn test_sudoers_content_contains_required_sections() {
         let tools = vec!["apt".to_string()];
