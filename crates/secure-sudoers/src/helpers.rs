@@ -59,6 +59,18 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
                 }
             }
 
+            let mut attached_found = false;
+            for s_flag in sensitive_flags {
+                if s_flag.starts_with('-') && !s_flag.starts_with("--") && s_flag.len() == 2 {
+                    if arg.starts_with(s_flag) && arg.len() > 2 {
+                        redacted.push(format!("{}[REDACTED]", s_flag));
+                        attached_found = true;
+                        break;
+                    }
+                }
+            }
+            if attached_found { continue; }
+
             redacted.push(arg.clone());
             if sensitive_flags.contains(arg) {
                 skip_next = true;
@@ -79,6 +91,9 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
                             return format!("{}=[REDACTED]", key);
                         }
                     } else if arg.starts_with('-') {
+                        if !arg.starts_with("--") && arg.len() > 2 {
+                            return format!("{}[REDACTED]", &arg[..2]);
+                        }
                         return arg.clone();
                     }
                     "[REDACTED]".to_string()
@@ -94,6 +109,27 @@ mod tests {
     use super::*;
     use secure_sudoers_common::testing::fixtures::{args as argv, make_policy};
     use secure_sudoers_common::models::UnauthorizedAuditMode;
+
+    #[test]
+    fn test_redact_args_attached_short_flag() {
+        let mut policy = make_policy();
+        if let Some(tool) = policy.tools.get_mut("apt") {
+            tool.sensitive_flags.push("-p".to_string());
+        }
+        let args = argv(&["install", "-pSECRET", "curl"]);
+        let redacted = redact_args(&args, &policy, "apt");
+        assert_eq!(redacted, argv(&["install", "-p[REDACTED]", "curl"]));
+    }
+
+    #[test]
+    fn test_redact_args_unauthorized_keys_only_attached() {
+        let mut policy = make_policy();
+        policy.global_settings.unauthorized_audit_mode = UnauthorizedAuditMode::KeysOnly;
+        let args = argv(&["-pSECRET", "-abc", "--longer"]);
+        let redacted = redact_args(&args, &policy, "unknown");
+        // -pSECRET -> -p[REDACTED], -abc -> -a[REDACTED], --longer -> --longer
+        assert_eq!(redacted, vec!["-p[REDACTED]", "-a[REDACTED]", "--longer"]);
+    }
 
     #[test]
     fn test_redact_args_unauthorized_minimal() {

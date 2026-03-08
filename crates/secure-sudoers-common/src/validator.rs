@@ -120,6 +120,40 @@ mod tests {
     }
 
     #[test]
+    fn test_attached_short_flags() {
+        use crate::models::{FlagRule, ToolPolicy};
+        let mut p = make_policy();
+        let mut flag_rules = HashMap::new();
+        flag_rules.insert("-p".to_string(), FlagRule::Constant("any".to_string()));
+        
+        p.tools.insert("test".to_string(), ToolPolicy {
+            real_binary: "/usr/bin/test".to_string(),
+            verbs: vec![], 
+            flags: vec!["-v".to_string()], 
+            flags_with_args: vec![], 
+            flags_with_path_args: vec!["-P".to_string()],
+            disallowed_positional_args: vec![], 
+            validate_positional_args_as_paths: false,
+            sensitive_flags: vec![], 
+            help_description: "test".to_string(),
+            isolation: None, 
+            env_whitelist: vec![], 
+            flag_rules,
+        });
+
+        // -pVALUE
+        let cmd1 = validate_command(&p, "test", args(&["-pVALUE"])).unwrap();
+        assert_eq!(cmd1.args(), args(&["-p", "VALUE"]));
+
+        // -vpVALUE
+        let cmd2 = validate_command(&p, "test", args(&["-vpVALUE"])).unwrap();
+        assert_eq!(cmd2.args(), args(&["-v", "-p", "VALUE"]));
+
+        // Path-taking attached flag -P/etc/shadow (should be blocked)
+        assert!(validate_command(&p, "test", args(&["-P/etc/shadow"])).is_err());
+    }
+
+    #[test]
     fn test_flag_with_equals_syntax() {
         use crate::models::{FlagRule, ToolPolicy};
         let mut p = make_policy();

@@ -30,32 +30,42 @@ pub fn process_short_flag(
     blocked_paths: &[String],
     out: &mut Vec<String>,
 ) -> Result<(), String> {
+    // Try processing the whole argument as a single multi-character flag or flag with '='
+    if process_flag_with_value(&arg, None, flags_with_args, flags_with_path_args, flag_rules, iter, blocked_paths, out)? {
+        return Ok(());
+    }
+    if flags.contains(&arg) {
+        out.push(arg);
+        return Ok(());
+    }
+
+    // Otherwise, deconstruct into individual short flags with greedy argument consumption
     let chars: Vec<char> = arg[1..].chars().collect();
-    if chars.len() > 1 {
-        // Try processing the whole cluster as a single multi-character flag first (e.g. -tt)
-        if process_flag_with_value(&arg, flags_with_args, flags_with_path_args, flag_rules, iter, blocked_paths, out)? {
-            return Ok(());
-        }
-        if flags.contains(&arg) {
-            out.push(arg);
+    for (i, &c) in chars.iter().enumerate() {
+        let s = format!("-{}", c);
+        let has_rule = flag_rules.contains_key(&s);
+        let is_arg_flag = flags_with_args.contains(&s);
+        let is_path_flag = flags_with_path_args.contains(&s);
+
+        if has_rule || is_arg_flag || is_path_flag {
+            // Greedy consumption: if there are remaining characters, they are the value.
+            let attached_value = if i + 1 < chars.len() {
+                Some(chars[i + 1..].iter().collect::<String>())
+            } else {
+                None
+            };
+
+            // Process this specific flag (which we know takes a value)
+            process_flag_with_value(&s, attached_value, flags_with_args, flags_with_path_args, flag_rules, iter, blocked_paths, out)?;
             return Ok(());
         }
 
-        // Otherwise, deconstruct into individual short flags
-        for c in &chars {
-            let s = format!("-{}", c);
-            if flags_with_args.contains(&s) || flags_with_path_args.contains(&s) || flag_rules.contains_key(&s) {
-                return Err(format!("Flag '{}' takes an argument and cannot be clustered in '{}'", s, arg));
-            }
-            if !flags.contains(&s) {
-                return Err(format!("Flag '{}' (from '{}') is not permitted for tool '{}'", s, arg, tool_name));
-            }
+        if !flags.contains(&s) {
+            return Err(format!("Flag '{}' (from '{}') is not permitted for tool '{}'", s, arg, tool_name));
         }
-        for c in chars { out.push(format!("-{}", c)); }
-        Ok(())
-    } else {
-        process_any_flag(&arg, tool_name, flags, flags_with_args, flags_with_path_args, flag_rules, iter, blocked_paths, out)
+        out.push(s);
     }
+    Ok(())
 }
 
 fn process_any_flag(
@@ -69,7 +79,7 @@ fn process_any_flag(
     blocked_paths: &[String],
     out: &mut Vec<String>,
 ) -> Result<(), String> {
-    if !process_flag_with_value(flag, flags_with_args, flags_with_path_args, flag_rules, iter, blocked_paths, out)? {
+    if !process_flag_with_value(flag, None, flags_with_args, flags_with_path_args, flag_rules, iter, blocked_paths, out)? {
         if flags.contains(&flag.to_string()) {
             out.push(flag.to_string());
         } else {
@@ -81,6 +91,7 @@ fn process_any_flag(
 
 fn process_flag_with_value(
     flag: &str,
+    attached_value: Option<String>,
     flags_with_args: &[String],
     flags_with_path_args: &[String],
     flag_rules: &HashMap<String, FlagRule>,
@@ -88,9 +99,13 @@ fn process_flag_with_value(
     blocked_paths: &[String],
     out: &mut Vec<String>,
 ) -> Result<bool, String> {
-    let (flag_name, provided_value) = match flag.find('=') {
-        Some(idx) => (&flag[..idx], Some(&flag[idx + 1..])),
-        None => (flag, None),
+    let (flag_name, provided_value) = if let Some(val) = attached_value {
+        (flag, Some(val))
+    } else {
+        match flag.find('=') {
+            Some(idx) => (&flag[..idx], Some(flag[idx + 1..].to_string())),
+            None => (flag, None),
+        }
     };
 
     let has_rule = flag_rules.contains_key(flag_name);
@@ -99,7 +114,7 @@ fn process_flag_with_value(
 
     if has_rule || is_arg_flag || is_path_flag {
         let val = match provided_value {
-            Some(v) => v.to_string(),
+            Some(v) => v,
             None => iter.next().ok_or_else(|| format!("Flag '{}' requires an argument", flag_name))?,
         };
         
