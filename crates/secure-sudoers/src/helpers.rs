@@ -48,9 +48,24 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
     let mut redacted = Vec::with_capacity(args.len());
     let mut skip_next = false;
     for arg in args {
-        if skip_next { redacted.push("[REDACTED]".to_string()); skip_next = false; continue; }
+        if skip_next {
+            redacted.push("[REDACTED]".to_string());
+            skip_next = false;
+            continue;
+        }
+
+        if let Some(idx) = arg.find('=') {
+            let key = &arg[..idx];
+            if sensitive_flags.iter().any(|f| f == key) {
+                redacted.push(format!("{}=[REDACTED]", key));
+                continue;
+            }
+        }
+
         redacted.push(arg.clone());
-        if sensitive_flags.contains(arg) { skip_next = true; }
+        if sensitive_flags.contains(arg) {
+            skip_next = true;
+        }
     }
     redacted
 }
@@ -58,7 +73,20 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secure_sudoers_common::testing::fixtures::args as argv;
+    use secure_sudoers_common::testing::fixtures::{args as argv, make_policy};
+
+    #[test]
+    fn test_redact_args_with_equals_syntax() {
+        let mut policy = make_policy();
+        if let Some(tool) = policy.tools.get_mut("apt") {
+            tool.sensitive_flags.push("--password".to_string());
+        }
+        
+        let raw_args = argv(&["install", "--password=SECRET", "--password", "SECRET2", "curl"]);
+        let redacted = redact_args(&raw_args, &policy, "apt");
+        
+        assert_eq!(redacted, argv(&["install", "--password=[REDACTED]", "--password", "[REDACTED]", "curl"]));
+    }
 
     #[test]
     fn direct_invocation_extracts_tool_and_args() {

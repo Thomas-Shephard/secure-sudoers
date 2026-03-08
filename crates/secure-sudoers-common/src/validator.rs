@@ -120,6 +120,31 @@ mod tests {
     }
 
     #[test]
+    fn test_flag_with_equals_syntax() {
+        use crate::models::{FlagRule, ToolPolicy};
+        let mut p = make_policy();
+        let mut flag_rules = HashMap::new();
+        flag_rules.insert("--target".to_string(), FlagRule::Constant("any".to_string()));
+        flag_rules.insert("-p".to_string(), FlagRule::Constant("any".to_string()));
+        
+        p.tools.insert("deploy".to_string(), ToolPolicy {
+            real_binary: "/usr/local/bin/deploy".to_string(),
+            verbs: vec![], flags: vec![], flags_with_args: vec![], flags_with_path_args: vec![],
+            disallowed_positional_args: vec![], validate_positional_args_as_paths: false,
+            sensitive_flags: vec![], help_description: "Deploy.".to_string(),
+            isolation: None, env_whitelist: vec![], flag_rules,
+        });
+
+        // Long flag with =
+        let cmd1 = validate_command(&p, "deploy", args(&["--target=PROD"])).unwrap();
+        assert_eq!(cmd1.args(), args(&["--target", "PROD"]));
+
+        // Short flag with =
+        let cmd2 = validate_command(&p, "deploy", args(&["-p=HELLO"])).unwrap();
+        assert_eq!(cmd2.args(), args(&["-p", "HELLO"]));
+    }
+
+    #[test]
     fn test_flag_injection_via_delimiter_rejected() {
         let p = make_policy();
         // -- followed by something that looks like a flag should be rejected if not a path

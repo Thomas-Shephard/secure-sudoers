@@ -88,26 +88,34 @@ fn process_flag_with_value(
     blocked_paths: &[String],
     out: &mut Vec<String>,
 ) -> Result<bool, String> {
-    let has_rule = flag_rules.contains_key(flag);
-    let is_arg_flag = flags_with_args.contains(&flag.to_string());
-    let is_path_flag = flags_with_path_args.contains(&flag.to_string());
+    let (flag_name, provided_value) = match flag.find('=') {
+        Some(idx) => (&flag[..idx], Some(&flag[idx + 1..])),
+        None => (flag, None),
+    };
+
+    let has_rule = flag_rules.contains_key(flag_name);
+    let is_arg_flag = flags_with_args.contains(&flag_name.to_string());
+    let is_path_flag = flags_with_path_args.contains(&flag_name.to_string());
 
     if has_rule || is_arg_flag || is_path_flag {
-        let val = iter.next().ok_or_else(|| format!("Flag '{}' requires an argument", flag))?;
+        let val = match provided_value {
+            Some(v) => v.to_string(),
+            None => iter.next().ok_or_else(|| format!("Flag '{}' requires an argument", flag_name))?,
+        };
         
-        if let Some(rule) = flag_rules.get(flag) {
+        if let Some(rule) = flag_rules.get(flag_name) {
             if !rule.matches(&val) {
-                return Err(format!("Flag '{}' argument '{}' is not permitted by policy", flag, val));
+                return Err(format!("Flag '{}' argument '{}' is not permitted by policy", flag_name, val));
             }
         }
 
         if is_path_flag {
-            let context = ValidationContext::Flag(flag.to_string());
+            let context = ValidationContext::Flag(flag_name.to_string());
             let canonical = check_path(&val, &context, blocked_paths)?;
-            out.push(flag.to_string());
+            out.push(flag_name.to_string());
             out.push(canonical);
         } else {
-            out.push(flag.to_string());
+            out.push(flag_name.to_string());
             out.push(val);
         }
         return Ok(true);
