@@ -31,18 +31,48 @@ fn validate_path_isolated(path_str: &str, blocked_paths: &[String]) -> Result<()
 
 fn apply_blocked_paths(paths: &[String]) -> Result<(), String> {
     for path_str in paths {
-        let st = match std::fs::metadata(path_str) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("Security failure: cannot stat blocked path '{}': {e}", path_str)),
-        };
-
-        if st.is_dir() {
-            mount(Some("tmpfs"), path_str.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
-                .map_err(|e| format!("Security failure: tmpfs mount on blocked dir '{}' failed: {e}", path_str))?;
+        let path = std::path::Path::new(path_str);
+        if let Ok(st) = path.metadata() {
+            if st.is_dir() {
+                mount(Some("tmpfs"), path_str.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
+                    .map_err(|e| format!("Security failure: tmpfs mount on blocked dir '{}' failed: {e}", path_str))?;
+            } else {
+                mount(Some("/dev/null"), path_str.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
+                    .map_err(|e| format!("Security failure: bind mount /dev/null on blocked file '{}' failed: {e}", path_str))?;
+            }
         } else {
-            mount(Some("/dev/null"), path_str.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
-                .map_err(|e| format!("Security failure: bind mount /dev/null on blocked file '{}' failed: {e}", path_str))?;
+            // Path doesn't exist, find the first missing component and mask it
+            let mut components = Vec::new();
+            let mut current = path;
+            while !current.exists() {
+                components.push(current);
+                if let Some(parent) = current.parent() {
+                    current = parent;
+                } else {
+                    break;
+                }
+            }
+
+            if let Some(to_create) = components.last() {
+                let to_create_str = to_create.to_string_lossy().into_owned();
+                let is_dir = to_create != &path;
+
+                if is_dir {
+                    std::fs::create_dir_all(to_create)
+                        .map_err(|e| format!("Security failure: cannot create mask dir '{}': {e}", to_create_str))?;
+                    mount(Some("tmpfs"), to_create_str.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
+                        .map_err(|e| format!("Security failure: tmpfs mount on mask dir '{}' failed: {e}", to_create_str))?;
+                } else {
+                    // Ensure parent exists before creating file
+                    if let Some(parent) = to_create.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    std::fs::File::create(to_create)
+                        .map_err(|e| format!("Security failure: cannot create mask file '{}': {e}", to_create_str))?;
+                    mount(Some("/dev/null"), to_create_str.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
+                        .map_err(|e| format!("Security failure: bind mount /dev/null on mask file '{}' failed: {e}", to_create_str))?;
+                }
+            }
         }
     }
     Ok(())
