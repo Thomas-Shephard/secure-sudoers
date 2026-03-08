@@ -30,6 +30,7 @@ fn validate_path_isolated(path_str: &str, blocked_paths: &[String]) -> Result<()
 }
 
 fn apply_blocked_paths(paths: &[String]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
     for path_str in paths {
         let path = std::path::Path::new(path_str);
         if let Ok(st) = path.metadata() {
@@ -58,17 +59,25 @@ fn apply_blocked_paths(paths: &[String]) -> Result<(), String> {
                 let is_dir = to_create != &path;
 
                 if is_dir {
+                    if let Ok(meta) = std::fs::symlink_metadata(to_create) {
+                        if meta.file_type().is_symlink() {
+                            return Err(format!("Security failure: mask directory target '{}' is a symlink", to_create_str));
+                        }
+                    }
                     std::fs::create_dir_all(to_create)
                         .map_err(|e| format!("Security failure: cannot create mask dir '{}': {e}", to_create_str))?;
                     mount(Some("tmpfs"), to_create_str.as_str(), Some("tmpfs"), MsFlags::empty(), None::<&str>)
                         .map_err(|e| format!("Security failure: tmpfs mount on mask dir '{}' failed: {e}", to_create_str))?;
                 } else {
-                    // Ensure parent exists before creating file
                     if let Some(parent) = to_create.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    std::fs::File::create(to_create)
-                        .map_err(|e| format!("Security failure: cannot create mask file '{}': {e}", to_create_str))?;
+                    std::fs::OpenOptions::new()
+                        .write(true).create(true).truncate(true)
+                        .custom_flags(libc::O_NOFOLLOW)
+                        .open(to_create)
+                        .map_err(|e| format!("Security failure: cannot safely create mask file '{}': {e}", to_create_str))?;
+
                     mount(Some("/dev/null"), to_create_str.as_str(), None::<&str>, MsFlags::MS_BIND, None::<&str>)
                         .map_err(|e| format!("Security failure: bind mount /dev/null on mask file '{}' failed: {e}", to_create_str))?;
                 }
