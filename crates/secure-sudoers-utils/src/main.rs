@@ -28,6 +28,14 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
+
+    if !matches!(cli.command, Commands::GenerateManPage) {
+        if let Err(e) = secure_sudoers_utils::require_root() {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+
     let result = match cli.command {
         Commands::GenKeys => keys::cmd_gen_keys(),
         Commands::Sign { policy_path, key_path } => cmd_sign(&policy_path, &key_path),

@@ -26,20 +26,12 @@ pub fn generate_sudoers_content(tools: &[String]) -> String {
     )
 }
 
-fn require_root() -> Result<(), String> {
-    if unsafe { libc::getuid() } != 0 {
-        return Err("Root privileges required.".to_string());
-    }
-    Ok(())
-}
-
 fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {path}: {e}"))?;
     serde_json::from_str(&src).map_err(|e| format!("Invalid policy JSON at {path}: {e}"))
 }
 
 fn install() -> Result<(), String> {
-    require_root()?;
     let mut policy = load_policy(INSTALL_POLICY_PATH)?;
     policy.validate().map_err(|e| format!("Policy validation failed: {e}"))?;
 
@@ -68,7 +60,6 @@ fn install() -> Result<(), String> {
 }
 
 fn unlock() -> Result<(), String> {
-    require_root()?;
     let mut policy = load_policy(INSTALL_POLICY_PATH)?;
     let _ = policy.validate();
 
