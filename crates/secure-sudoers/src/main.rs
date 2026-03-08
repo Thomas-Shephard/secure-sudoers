@@ -26,12 +26,6 @@ fn main() {
 
     logging::init_logging(&policy.global_settings);
 
-    if let Err(e) = policy.validate() {
-        error!(reason = %e, "Policy validation failed");
-        eprintln!("FATAL: Policy validation failed: {e}");
-        std::process::exit(1);
-    }
-
     let user = std::env::var("SUDO_USER")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "unknown".to_string());

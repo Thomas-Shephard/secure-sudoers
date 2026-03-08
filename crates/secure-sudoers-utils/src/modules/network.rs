@@ -24,7 +24,7 @@ pub fn run(url: &str, pubkey_path: &str) -> Result<(), String> {
     verifying_key.verify(&policy_bytes, &Signature::from_bytes(&sig_arr))
         .map_err(|e| format!("Signature verification failed: {e}"))?;
 
-    let new_policy: SecureSudoersPolicy = serde_json::from_slice(&policy_bytes)
+    let mut new_policy: SecureSudoersPolicy = serde_json::from_slice(&policy_bytes)
         .map_err(|e| format!("Downloaded policy is not valid JSON: {e}"))?;
     new_policy.validate().map_err(|e| format!("Downloaded policy failed semantic validation: {e}"))?;
 

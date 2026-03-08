@@ -40,7 +40,7 @@ fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
 
 fn install() -> Result<(), String> {
     require_root()?;
-    let policy = load_policy(INSTALL_POLICY_PATH)?;
+    let mut policy = load_policy(INSTALL_POLICY_PATH)?;
     policy.validate().map_err(|e| format!("Policy validation failed: {e}"))?;
 
     let mut tool_names: Vec<String> = policy.tools.keys().cloned().collect();
@@ -69,7 +69,7 @@ fn install() -> Result<(), String> {
 
 fn unlock() -> Result<(), String> {
     require_root()?;
-    let policy = load_policy(INSTALL_POLICY_PATH)?;
+    let mut policy = load_policy(INSTALL_POLICY_PATH)?;
     let _ = policy.validate();
 
     let mut tool_names: Vec<String> = policy.tools.keys().cloned().collect();

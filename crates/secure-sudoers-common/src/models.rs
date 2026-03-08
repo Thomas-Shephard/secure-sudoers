@@ -174,13 +174,26 @@ pub fn is_valid_tool_name(name: &str) -> bool {
 }
 
 impl SecureSudoersPolicy {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&mut self) -> Result<(), String> {
         if let Err(_) = regex::Regex::new(&self.global_settings.safe_arg_regex) {
             return Err("Invalid regex in safe_arg_regex".to_string());
         }
+
+        let mut canonicalized_blocked = Vec::new();
         for path in &self.global_settings.blocked_paths {
-            if !path.starts_with('/') { return Err(format!("Blocked path must be absolute: {}", path)); }
+            if !path.starts_with('/') {
+                return Err(format!("Blocked path must be absolute: {}", path));
+            }
+            match std::fs::canonicalize(path) {
+                Ok(p) => canonicalized_blocked.push(p.to_string_lossy().into_owned()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    canonicalized_blocked.push(path.clone());
+                }
+                Err(e) => return Err(format!("Security failure: cannot canonicalize blocked path '{}': {}", path, e)),
+            }
         }
+        self.global_settings.blocked_paths = canonicalized_blocked;
+
         for (name, tool) in &self.tools {
             if !is_valid_tool_name(name) { return Err(format!("Invalid tool name in policy: '{}'", name)); }
             if !tool.real_binary.starts_with('/') { return Err(format!("real_binary for tool '{}' must be an absolute path", name)); }

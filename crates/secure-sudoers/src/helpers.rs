@@ -36,8 +36,11 @@ pub fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
     verifying_key.verify(&policy_bytes, &signature)
         .map_err(|e| format!("Integrity failure: policy signature verification failed for {path}: {e}"))?;
 
-    serde_json::from_slice::<SecureSudoersPolicy>(&policy_bytes)
-        .map_err(|e| format!("Failed to parse validated policy JSON: {e}"))
+    let mut policy: SecureSudoersPolicy = serde_json::from_slice(&policy_bytes)
+        .map_err(|e| format!("Failed to parse validated policy JSON: {e}"))?;
+    
+    policy.validate().map_err(|e| format!("Policy validation failed: {e}"))?;
+    Ok(policy)
 }
 pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &str) -> Vec<String> {
     if let Some(tool) = policy.tools.get(tool_name) {

@@ -19,7 +19,7 @@ fn test_policy_parsing_and_validation() {
         }
     }"#;
 
-    let policy: SecureSudoersPolicy = serde_json::from_str(json).unwrap();
+    let mut policy: SecureSudoersPolicy = serde_json::from_str(json).unwrap();
     policy.validate().unwrap();
 
     let args = vec!["-l".to_string(), "/tmp".to_string()];
@@ -41,7 +41,8 @@ fn test_policy_rejects_blocked_path() {
             }
         }
     }"#;
-    let policy: SecureSudoersPolicy = serde_json::from_str(json).unwrap();
+    let mut policy: SecureSudoersPolicy = serde_json::from_str(json).unwrap();
+    policy.validate().unwrap();
     
     let args = vec!["/etc/shadow".to_string()];
     assert!(validate_command(&policy, "cat", args).is_err());
@@ -62,7 +63,8 @@ fn test_policy_enforces_flag_rules() {
             }
         }
     }"#;
-    let policy: SecureSudoersPolicy = serde_json::from_str(json).unwrap();
+    let mut policy: SecureSudoersPolicy = serde_json::from_str(json).unwrap();
+    policy.validate().unwrap();
 
     assert!(validate_command(&policy, "service", vec!["--action".to_string(), "start".to_string()]).is_ok());
     assert!(validate_command(&policy, "service", vec!["--action".to_string(), "restart".to_string()]).is_err());

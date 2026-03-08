@@ -205,6 +205,40 @@ mod tests {
     }
 
     #[test]
+    fn test_blocked_path_canonicalization() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_dir = tmp.join("secure_sudoers_test_real");
+        let symlink_dir = tmp.join("secure_sudoers_test_symlink");
+        
+        let _ = std::fs::remove_dir_all(&real_dir);
+        let _ = std::fs::remove_file(&symlink_dir);
+        
+        std::fs::create_dir(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
+        
+        // Block the symlink
+        p.global_settings.blocked_paths = vec![symlink_dir.to_string_lossy().into_owned()];
+        
+        // Validation should canonicalize it to real_dir
+        p.validate().unwrap();
+        
+        p.tools.insert("ls".to_string(), ToolPolicy {
+            real_binary: "/bin/ls".to_string(),
+            verbs: vec![], flags: vec![], flags_with_args: vec![], flags_with_path_args: vec![],
+            disallowed_positional_args: vec![], validate_positional_args_as_paths: true,
+            sensitive_flags: vec![], help_description: "x".to_string(),
+            isolation: None, env_whitelist: vec![], flag_rules: HashMap::new(),
+        });
+
+        // Accessing via real path should be blocked
+        assert!(validate_command(&p, "ls", args(&[real_dir.to_str().unwrap()])).is_err());
+        
+        let _ = std::fs::remove_file(&symlink_dir);
+        let _ = std::fs::remove_dir_all(&real_dir);
+    }
+
+    #[test]
     fn test_root_path_blocking() {
         let mut p = make_policy();
         p.global_settings.blocked_paths = vec!["/".to_string()];
