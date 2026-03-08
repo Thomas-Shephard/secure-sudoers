@@ -37,13 +37,23 @@ pub fn run(url: &str, pubkey_path: &str) -> Result<(), String> {
     }
 
     let policy_dir = Path::new(POLICY_PATH).parent().unwrap_or_else(|| Path::new("/etc/secure-sudoers"));
-    let mut tmp = tempfile::NamedTempFile::new_in(policy_dir)
-        .map_err(|e| format!("Cannot create temp file in {}: {e}", policy_dir.display()))?;
-    tmp.write_all(&policy_bytes).map_err(|e| format!("Failed to write temp file: {e}"))?;
-    tmp.flush().map_err(|e| format!("Failed to flush temp file: {e}"))?;
-    tmp.persist(POLICY_PATH).map_err(|e| format!("Atomic rename failed: {}", e.error))?;
+    let sig_path = format!("{POLICY_PATH}.sig");
 
-    println!("Policy updated to serial {} and installed at {POLICY_PATH}", new_policy.serial);
+    // Persist the signature
+    let mut tmp_sig = tempfile::NamedTempFile::new_in(policy_dir)
+        .map_err(|e| format!("Cannot create temp sig file in {}: {e}", policy_dir.display()))?;
+    tmp_sig.write_all(&sig_bytes).map_err(|e| format!("Failed to write temp sig file: {e}"))?;
+    tmp_sig.flush().map_err(|e| format!("Failed to flush temp sig file: {e}"))?;
+    tmp_sig.persist(&sig_path).map_err(|e| format!("Atomic rename of signature failed: {}", e.error))?;
+
+    // Persist the policy
+    let mut tmp_policy = tempfile::NamedTempFile::new_in(policy_dir)
+        .map_err(|e| format!("Cannot create temp policy file in {}: {e}", policy_dir.display()))?;
+    tmp_policy.write_all(&policy_bytes).map_err(|e| format!("Failed to write temp policy file: {e}"))?;
+    tmp_policy.flush().map_err(|e| format!("Failed to flush temp policy file: {e}"))?;
+    tmp_policy.persist(POLICY_PATH).map_err(|e| format!("Atomic rename of policy failed: {}", e.error))?;
+
+    println!("Policy and signature updated to serial {} and installed at {POLICY_PATH}", new_policy.serial);
     Ok(())
 }
 
