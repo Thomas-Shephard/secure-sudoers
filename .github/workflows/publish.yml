@@ -39,17 +39,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-#      - name: Set up swap space
-#        run: |
-#          SWAPFILE=/swapfile
-#          if [ -f "$SWAPFILE" ]; then
-#            sudo swapoff "$SWAPFILE" || true
-#          fi
-#          sudo fallocate -l 8G "$SWAPFILE"
-#          sudo chmod 600 "$SWAPFILE"
-#          sudo mkswap "$SWAPFILE"
-#          sudo swapon "$SWAPFILE"
-#          free -h
       - name: Install Zig
         if: matrix.use_zigbuild
         uses: goto-bus-stop/setup-zig@v2
