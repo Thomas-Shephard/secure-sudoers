@@ -1,40 +1,46 @@
 #[cfg(feature = "testing")]
 pub mod fixtures {
     use crate::models::{
-        GlobalSettings, IsolationSettings, SecureSudoersPolicy, ToolPolicy, UnauthorizedAuditMode,
+        GlobalSettings, IsolationSettings, ParameterConfig, SecureSudoersPolicy, ToolPolicy,
+        UnauthorizedAuditMode,
     };
     use std::collections::HashMap;
 
     pub fn make_policy() -> SecureSudoersPolicy {
         let mut tools = HashMap::new();
+        let mut tail_params = HashMap::new();
+        tail_params.insert("-v".to_string(), ParameterConfig::bool());
+        tail_params.insert("-q".to_string(), ParameterConfig::bool());
+        tail_params.insert("-f".to_string(), ParameterConfig::bool());
+        tail_params.insert("-n".to_string(), ParameterConfig::string());
+        tail_params.insert("-c".to_string(), ParameterConfig::string());
+
         tools.insert(
             "tail".to_string(),
             ToolPolicy {
                 real_binary: "/usr/bin/tail".to_string(),
                 verbs: vec![],
-                flags: vec!["-v".to_string(), "-q".to_string(), "-f".to_string()],
-                flags_with_args: vec!["-n".to_string(), "-c".to_string()],
-                flags_with_path_args: vec![],
+                parameters: tail_params,
                 disallowed_positional_args: vec![],
-                validate_positional_args_as_paths: true,
-                sensitive_flags: vec![],
+                positional: Some(ParameterConfig::path()),
                 help_description: "tail".to_string(),
                 isolation: None,
                 env_whitelist: vec![],
-                flag_rules: HashMap::new(),
             },
         );
+
+        let mut apt_params = HashMap::new();
+        apt_params.insert("-y".to_string(), ParameterConfig::bool());
+        apt_params.insert("-a".to_string(), ParameterConfig::bool());
+
         tools.insert(
             "apt".to_string(),
             ToolPolicy {
                 real_binary: "/usr/bin/apt".to_string(),
                 verbs: vec!["update".to_string(), "install".to_string()],
-                flags: vec!["-y".to_string(), "-a".to_string()],
-                flags_with_args: vec![],
-                flags_with_path_args: vec![],
+                parameters: apt_params,
                 disallowed_positional_args: vec![],
-                validate_positional_args_as_paths: false,
-                sensitive_flags: vec![],
+                positional: None,
                 help_description: "apt".to_string(),
                 isolation: Some(IsolationSettings {
                     unshare_network: false,
@@ -42,7 +48,6 @@ pub mod fixtures {
                     ..IsolationSettings::default()
                 }),
                 env_whitelist: vec![],
-                flag_rules: HashMap::new(),
             },
         );
 
@@ -89,16 +94,12 @@ pub mod fixtures {
         ToolPolicy {
             real_binary: real_binary.to_string(),
             verbs: vec![],
-            flags: vec![],
-            flags_with_args: vec![],
-            flags_with_path_args: vec![],
+            parameters: HashMap::new(),
             disallowed_positional_args: vec![],
-            validate_positional_args_as_paths: true,
+            positional: Some(ParameterConfig::path()),
             help_description: "test tool".to_string(),
             isolation: None,
             env_whitelist: vec![],
-            sensitive_flags: vec![],
-            flag_rules: HashMap::new(),
         }
     }
 

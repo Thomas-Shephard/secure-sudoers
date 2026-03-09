@@ -74,12 +74,8 @@ pub fn validate_command(
 
     let v_params = helpers::ValidationParams {
         tool_name,
-        flags: &tool.flags,
-        flags_with_args: &tool.flags_with_args,
-        flags_with_path_args: &tool.flags_with_path_args,
-        flag_rules: &tool.flag_rules,
+        parameters: &tool.parameters,
         blocked_paths: &policy.global_settings.blocked_paths,
-        sensitive_flags: &tool.sensitive_flags,
     };
 
     while let Some(arg) = iter.next() {
@@ -89,7 +85,7 @@ pub fn validate_command(
                 context: &ValidationContext::DelimitedPositional,
                 disallowed: &tool.disallowed_positional_args,
                 safe_re: &safe_re,
-                validate_as_path: tool.validate_positional_args_as_paths,
+                config: &tool.positional,
                 blocked_paths: &policy.global_settings.blocked_paths,
             };
             for rem in iter {
@@ -106,7 +102,7 @@ pub fn validate_command(
                 context: &ValidationContext::Positional,
                 disallowed: &tool.disallowed_positional_args,
                 safe_re: &safe_re,
-                validate_as_path: tool.validate_positional_args_as_paths,
+                config: &tool.positional,
                 blocked_paths: &policy.global_settings.blocked_paths,
             };
             helpers::push_positional(arg, &p_params, &mut out)?;
@@ -146,8 +142,8 @@ pub fn validate_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ParameterConfig;
     use crate::testing::fixtures::{args, make_policy, make_tool};
-    use std::collections::HashMap;
 
     #[test]
     fn test_unknown_tool_rejected() {
@@ -175,17 +171,13 @@ mod tests {
 
     #[test]
     fn test_attached_short_flags() {
-        use crate::models::FlagRule;
         let mut p = make_policy();
-        let mut flag_rules = HashMap::new();
-        flag_rules.insert("-p".to_string(), FlagRule::Constant("any".to_string()));
-
         let mut tool = make_tool("/usr/bin/test");
-        tool.flags = vec!["-v".to_string()];
-        tool.flags_with_path_args = vec!["-P".to_string()];
-        tool.validate_positional_args_as_paths = false;
-        tool.help_description = "test".to_string();
-        tool.flag_rules = flag_rules;
+        tool.parameters.insert("-v".into(), ParameterConfig::bool());
+        tool.parameters
+            .insert("-p".into(), ParameterConfig::string());
+        tool.parameters.insert("-P".into(), ParameterConfig::path());
+        tool.positional = None;
 
         p.tools.insert("test".to_string(), tool);
 
@@ -200,19 +192,13 @@ mod tests {
 
     #[test]
     fn test_flag_with_equals_syntax() {
-        use crate::models::FlagRule;
         let mut p = make_policy();
-        let mut flag_rules = HashMap::new();
-        flag_rules.insert(
-            "--target".to_string(),
-            FlagRule::Constant("any".to_string()),
-        );
-        flag_rules.insert("-p".to_string(), FlagRule::Constant("any".to_string()));
-
         let mut tool = make_tool("/usr/local/bin/deploy");
-        tool.validate_positional_args_as_paths = false;
-        tool.help_description = "Deploy.".to_string();
-        tool.flag_rules = flag_rules;
+        tool.parameters
+            .insert("--target".into(), ParameterConfig::string());
+        tool.parameters
+            .insert("-p".into(), ParameterConfig::string());
+        tool.positional = None;
 
         p.tools.insert("deploy".to_string(), tool);
 
@@ -227,7 +213,7 @@ mod tests {
     fn test_flag_injection_via_delimiter_rejected() {
         let p = make_policy();
         let args = args(&["--", "-exec", "id"]);
-        assert!(validate_command(&p, "ls", args).is_err());
+        assert!(validate_command(&p, "tail", args).is_err());
     }
 
     #[test]
@@ -267,20 +253,15 @@ mod tests {
 
     #[test]
     fn test_flag_argument_redaction() {
-        use crate::models::FlagRule;
         let mut p = make_policy();
-        let mut flag_rules = HashMap::new();
-        flag_rules.insert(
-            "--secret".to_string(),
-            FlagRule::Constant("allowed".to_string()),
-        );
-
         let mut tool = make_tool("/usr/bin/login");
-        tool.flags_with_args = vec!["--secret".to_string()];
-        tool.validate_positional_args_as_paths = false;
-        tool.sensitive_flags = vec!["--secret".to_string()];
-        tool.help_description = "Login".to_string();
-        tool.flag_rules = flag_rules;
+        tool.parameters.insert(
+            "--secret".into(),
+            ParameterConfig::string()
+                .regex("allowed".to_string())
+                .sensitive(),
+        );
+        tool.positional = None;
 
         p.tools.insert("login".to_string(), tool);
 
@@ -303,6 +284,50 @@ mod tests {
         p.tools.insert("ls".to_string(), make_tool("/bin/ls"));
 
         assert!(validate_command(&p, "ls", args(&["/etc"])).is_err());
+    }
+
+    #[test]
+    fn test_path_regex_validation() {
+        let mut p = make_policy();
+        let mut tool = make_tool("/bin/ls");
+        tool.positional = Some(ParameterConfig::path().regex("^/tmp/.*".to_string()));
+        p.tools.insert("ls".to_string(), tool);
+
+        let path = "/tmp/secure_sudoers_test_foo";
+        std::fs::write(path, "test").unwrap();
+        assert!(validate_command(&p, "ls", args(&[path])).is_ok());
+        assert!(validate_command(&p, "ls", args(&["/etc/passwd"])).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_canonical_path_regex_validation() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_regex_real");
+        let symlink_file = tmp.join("secure_sudoers_regex_symlink");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let mut tool = make_tool("/bin/cat");
+        let regex = format!("^{}/.*", tmp.to_str().unwrap());
+        tool.positional = Some(ParameterConfig::path().regex(regex));
+        p.tools.insert("cat".to_string(), tool);
+
+        assert!(validate_command(&p, "cat", args(&[symlink_file.to_str().unwrap()])).is_ok());
+
+        let mut tool2 = make_tool("/bin/cat");
+        tool2.positional = Some(ParameterConfig::path().regex(".+symlink$".to_string()));
+        p.tools.insert("cat2".to_string(), tool2);
+
+        assert!(validate_command(&p, "cat2", args(&[symlink_file.to_str().unwrap()])).is_err());
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
     }
 }
 

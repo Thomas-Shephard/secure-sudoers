@@ -248,7 +248,7 @@ mod tests {
                 tools_json.push(',');
             }
             tools_json.push_str(&format!(
-                r#""{name}":{{"real_binary":"{binary}","help_description":"{name}"}}"#
+                r#""{name}":{{"real_binary":"{binary}","help_description":"{name}","parameters":{{}}}}"#
             ));
         }
         tools_json.push('}');

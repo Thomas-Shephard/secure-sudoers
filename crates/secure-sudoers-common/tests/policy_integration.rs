@@ -14,12 +14,16 @@ fn test_policy_parsing_and_validation() {
             "ls": {
                 "real_binary": "/bin/ls",
                 "help_description": "List files",
-                "flags": ["-l", "-a"]
+                "parameters": {
+                    "-l": { "type": "bool" },
+                    "-a": { "type": "bool" }
+                }
             }
         }
     }"#;
 
-    let mut policy: SecureSudoersPolicy = serde_json::from_str(json).unwrap();
+    let policy_res: Result<SecureSudoersPolicy, _> = serde_json::from_str(json);
+    let mut policy = policy_res.expect("Failed to parse policy JSON");
     policy.validate().unwrap();
 
     let args = vec!["-l".to_string(), "/tmp".to_string()];
@@ -37,7 +41,7 @@ fn test_policy_rejects_blocked_path() {
             "cat": {
                 "real_binary": "/bin/cat",
                 "help_description": "Read files",
-                "validate_positional_args_as_paths": true
+                "positional": { "type": "path" }
             }
         }
     }"#;
@@ -57,8 +61,11 @@ fn test_policy_enforces_flag_rules() {
             "service": {
                 "real_binary": "/usr/sbin/service",
                 "help_description": "Manage services",
-                "flag_rules": {
-                    "--action": ["start", "stop"]
+                "parameters": {
+                    "--action": {
+                        "type": "string",
+                        "choices": ["start", "stop"]
+                    }
                 }
             }
         }

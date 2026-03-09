@@ -1,31 +1,80 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum FlagRule {
-    List(Vec<FlagRule>),
-    Regex { regex: String },
-    Constant(String),
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterType {
+    Bool,
+    String,
+    Path,
 }
 
-impl FlagRule {
-    pub fn matches(&self, arg: &str) -> bool {
-        match self {
-            FlagRule::List(rules) => rules.iter().any(|r| r.matches(arg)),
-            FlagRule::Regex { regex } => regex::Regex::new(regex)
-                .map(|re| re.is_match(arg))
-                .unwrap_or(false),
-            FlagRule::Constant(s) => s == "any" || s == arg,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterConfig {
+    #[serde(rename = "type")]
+    pub param_type: ParameterType,
+    #[serde(default)]
+    pub sensitive: bool,
+    pub regex: Option<String>,
+    pub choices: Option<Vec<String>>,
+    pub help: Option<String>,
+}
+
+impl ParameterConfig {
+    pub fn matches(&self, val: &str) -> bool {
+        if let Some(ref choices) = self.choices {
+            if !choices.contains(&val.to_string()) {
+                return false;
+            }
+        }
+        if let Some(ref regex_str) = self.regex {
+            if let Ok(re) = regex::Regex::new(regex_str) {
+                if !re.is_match(val) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn any(t: ParameterType) -> Self {
+        Self {
+            param_type: t,
+            sensitive: false,
+            regex: None,
+            choices: None,
+            help: None,
         }
     }
 
-    pub(crate) fn collect_regexes<'a>(&'a self, out: &mut Vec<&'a str>) {
-        match self {
-            FlagRule::List(rules) => rules.iter().for_each(|r| r.collect_regexes(out)),
-            FlagRule::Regex { regex } => out.push(regex.as_str()),
-            FlagRule::Constant(_) => {}
-        }
+    pub fn bool() -> Self {
+        Self::any(ParameterType::Bool)
+    }
+
+    pub fn string() -> Self {
+        Self::any(ParameterType::String)
+    }
+
+    pub fn path() -> Self {
+        Self::any(ParameterType::Path)
+    }
+
+    pub fn sensitive(mut self) -> Self {
+        self.sensitive = true;
+        self
+    }
+
+    pub fn regex(mut self, r: String) -> Self {
+        self.regex = Some(r);
+        self
+    }
+
+    pub fn choices(mut self, c: Vec<String>) -> Self {
+        self.choices = Some(c);
+        self
     }
 }
 
@@ -33,9 +82,6 @@ fn default_unshare_ipc() -> bool {
     true
 }
 fn default_unshare_uts() -> bool {
-    true
-}
-fn default_true() -> bool {
     true
 }
 
@@ -76,23 +122,14 @@ pub struct ToolPolicy {
     #[serde(default)]
     pub verbs: Vec<String>,
     #[serde(default)]
-    pub flags: Vec<String>,
-    #[serde(default)]
-    pub flags_with_args: Vec<String>,
-    #[serde(default)]
-    pub flags_with_path_args: Vec<String>,
+    pub parameters: HashMap<String, ParameterConfig>,
     #[serde(default)]
     pub disallowed_positional_args: Vec<String>,
-    #[serde(default = "default_true")]
-    pub validate_positional_args_as_paths: bool,
+    pub positional: Option<ParameterConfig>,
     pub help_description: String,
     pub isolation: Option<IsolationSettings>,
     #[serde(default)]
     pub env_whitelist: Vec<String>,
-    #[serde(default)]
-    pub sensitive_flags: Vec<String>,
-    #[serde(default)]
-    pub flag_rules: HashMap<String, FlagRule>,
 }
 
 fn default_log_destination() -> String {
@@ -240,14 +277,22 @@ impl SecureSudoersPolicy {
                     name
                 ));
             }
-            for (flag, rule) in &tool.flag_rules {
-                let mut patterns: Vec<&str> = Vec::new();
-                rule.collect_regexes(&mut patterns);
-                for pattern in patterns {
-                    if regex::Regex::new(pattern).is_err() {
+            for (flag, config) in &tool.parameters {
+                if let Some(ref regex_str) = config.regex {
+                    if regex::Regex::new(regex_str).is_err() {
                         return Err(format!(
-                            "Invalid regex '{}' in flag_rules['{}'] for tool '{}'",
-                            pattern, flag, name
+                            "Invalid regex '{}' in parameter '{}' for tool '{}'",
+                            regex_str, flag, name
+                        ));
+                    }
+                }
+            }
+            if let Some(ref pos_config) = tool.positional {
+                if let Some(ref regex_str) = pos_config.regex {
+                    if regex::Regex::new(regex_str).is_err() {
+                        return Err(format!(
+                            "Invalid regex '{}' in positional config for tool '{}'",
+                            regex_str, name
                         ));
                     }
                 }
@@ -299,58 +344,30 @@ mod tests {
     }
 
     #[test]
-    fn test_flag_rule_matches_constant() {
-        let rule = FlagRule::Constant("debug".to_string());
-        assert!(rule.matches("debug"), "exact match should succeed");
-        assert!(!rule.matches("any"), "non-matching value should fail");
-        assert!(!rule.matches("release"), "non-matching value should fail");
-        assert!(!rule.matches(""), "empty string should fail");
-
-        let any_rule = FlagRule::Constant("any".to_string());
-        assert!(
-            any_rule.matches("debug"),
-            "'any' rule must match arbitrary args"
-        );
-        assert!(
-            any_rule.matches("release"),
-            "'any' rule must match arbitrary args"
-        );
-        assert!(any_rule.matches(""), "'any' rule must match empty arg");
-    }
-
-    #[test]
-    fn test_flag_rule_matches_list() {
-        let rule = FlagRule::List(vec![
-            FlagRule::Constant("one".to_string()),
-            FlagRule::Constant("two".to_string()),
-        ]);
-        assert!(rule.matches("one"));
-        assert!(rule.matches("two"));
-        assert!(!rule.matches("three"));
-        assert!(!rule.matches(""));
-    }
-
-    #[test]
-    fn test_flag_rule_matches_regex() {
-        let rule = FlagRule::Regex {
-            regex: r"^\d+$".to_string(),
+    fn test_parameter_config_matches_choices() {
+        let config = ParameterConfig {
+            param_type: ParameterType::String,
+            sensitive: false,
+            regex: None,
+            choices: Some(vec!["prod".into(), "stage".into()]),
+            help: None,
         };
-        assert!(rule.matches("123"));
-        assert!(rule.matches("0"));
-        assert!(!rule.matches("abc"));
-        assert!(!rule.matches("12a"));
-        assert!(!rule.matches(""));
+        assert!(config.matches("prod"));
+        assert!(config.matches("stage"));
+        assert!(!config.matches("dev"));
     }
 
     #[test]
-    fn test_flag_rule_matches_invalid_regex_returns_false() {
-        let rule = FlagRule::Regex {
-            regex: "[unclosed".to_string(),
+    fn test_parameter_config_matches_regex() {
+        let config = ParameterConfig {
+            param_type: ParameterType::String,
+            sensitive: false,
+            regex: Some(r"^\d+$".into()),
+            choices: None,
+            help: None,
         };
-        assert!(
-            !rule.matches("anything"),
-            "invalid regex should return false, not panic"
-        );
+        assert!(config.matches("123"));
+        assert!(!config.matches("abc"));
     }
 
     use crate::testing::fixtures::{make_tool, make_valid_policy};
@@ -401,13 +418,17 @@ mod tests {
     }
 
     #[test]
-    fn test_policy_validate_invalid_flag_rule_regex() {
+    fn test_policy_validate_invalid_parameter_regex() {
         let mut p = make_valid_policy();
         let mut tool = make_tool("/usr/bin/tool");
-        tool.flag_rules.insert(
+        tool.parameters.insert(
             "--format".to_string(),
-            FlagRule::Regex {
-                regex: "[unclosed".to_string(),
+            ParameterConfig {
+                param_type: ParameterType::String,
+                sensitive: false,
+                regex: Some("[unclosed".to_string()),
+                choices: None,
+                help: None,
             },
         );
         p.tools.insert("mytool".to_string(), tool);

@@ -134,9 +134,9 @@ fn test_redaction_in_stdout_log() {
           "real_binary": "/bin/true",
           "help_description": "apt package manager (test stub)",
           "verbs": ["install"],
-          "flags": [],
-          "flags_with_args": ["--password"],
-          "sensitive_flags": ["--password"]
+          "parameters": {
+            "--password": { "type": "string", "sensitive": true }
+          }
         }
       }
     }"#;

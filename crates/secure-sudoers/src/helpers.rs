@@ -75,9 +75,9 @@ pub(crate) fn load_policy_with_pubkey(
         .map_err(|e| format!("Policy validation failed: {e}"))?;
     Ok(policy)
 }
+
 pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &str) -> Vec<String> {
     if let Some(tool) = policy.tools.get(tool_name) {
-        let sensitive_flags = &tool.sensitive_flags;
         let mut redacted = Vec::with_capacity(args.len());
         let mut skip_next = false;
         for arg in args {
@@ -89,16 +89,22 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
 
             if let Some(idx) = arg.find('=') {
                 let key = &arg[..idx];
-                if sensitive_flags.iter().any(|f| f == key) {
-                    redacted.push(format!("{}=[REDACTED]", key));
-                    continue;
+                if let Some(config) = tool.parameters.get(key) {
+                    if config.sensitive {
+                        redacted.push(format!("{}=[REDACTED]", key));
+                        continue;
+                    }
                 }
             }
 
             let mut attached_found = false;
-            for s_flag in sensitive_flags {
-                if s_flag.starts_with('-') && !s_flag.starts_with("--") && s_flag.len() == 2 {
-                    let flag_char = s_flag.chars().nth(1).unwrap();
+            for (f_name, config) in &tool.parameters {
+                if config.sensitive
+                    && f_name.starts_with('-')
+                    && !f_name.starts_with("--")
+                    && f_name.len() == 2
+                {
+                    let flag_char = f_name.chars().nth(1).unwrap();
                     if arg.starts_with('-')
                         && !arg.starts_with("--")
                         && let Some(pos) = arg.find(flag_char)
@@ -119,8 +125,10 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
             }
 
             redacted.push(arg.clone());
-            if sensitive_flags.contains(arg) {
-                skip_next = true;
+            if let Some(config) = tool.parameters.get(arg) {
+                if config.sensitive {
+                    skip_next = true;
+                }
             }
         }
         redacted
@@ -155,14 +163,15 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secure_sudoers_common::models::UnauthorizedAuditMode;
+    use secure_sudoers_common::models::{ParameterConfig, ParameterType, UnauthorizedAuditMode};
     use secure_sudoers_common::testing::fixtures::{args as argv, make_policy};
 
     #[test]
     fn test_redact_args_clustered_with_separate_value() {
         let mut policy = make_policy();
         if let Some(tool) = policy.tools.get_mut("apt") {
-            tool.sensitive_flags.push("-p".to_string());
+            tool.parameters
+                .insert("-p".into(), ParameterConfig::string().sensitive());
         }
         let args = argv(&["install", "-vp", "secret", "curl"]);
         let redacted = redact_args(&args, &policy, "apt");
@@ -173,7 +182,8 @@ mod tests {
     fn test_redact_args_clustered_short_flag() {
         let mut policy = make_policy();
         if let Some(tool) = policy.tools.get_mut("apt") {
-            tool.sensitive_flags.push("-p".to_string());
+            tool.parameters
+                .insert("-p".into(), ParameterConfig::string().sensitive());
         }
         let args = argv(&["install", "-vpSECRET", "curl"]);
         let redacted = redact_args(&args, &policy, "apt");
@@ -184,7 +194,8 @@ mod tests {
     fn test_redact_args_attached_short_flag() {
         let mut policy = make_policy();
         if let Some(tool) = policy.tools.get_mut("apt") {
-            tool.sensitive_flags.push("-p".to_string());
+            tool.parameters
+                .insert("-p".into(), ParameterConfig::string().sensitive());
         }
         let args = argv(&["install", "-pSECRET", "curl"]);
         let redacted = redact_args(&args, &policy, "apt");
@@ -231,7 +242,16 @@ mod tests {
     fn test_redact_args_with_equals_syntax() {
         let mut policy = make_policy();
         if let Some(tool) = policy.tools.get_mut("apt") {
-            tool.sensitive_flags.push("--password".to_string());
+            tool.parameters.insert(
+                "--password".to_string(),
+                ParameterConfig {
+                    param_type: ParameterType::String,
+                    sensitive: true,
+                    regex: None,
+                    choices: None,
+                    help: None,
+                },
+            );
         }
 
         let raw_args = argv(&[
