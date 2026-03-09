@@ -300,6 +300,42 @@ impl SecureSudoersPolicy {
         }
         Ok(())
     }
+
+    pub fn lint(&mut self) -> Vec<String> {
+        let mut results = Vec::new();
+
+        if let Err(e) = self.validate() {
+            results.push(format!("Validation failed: {}", e));
+            return results;
+        }
+
+        for (name, tool) in &self.tools {
+            let path = std::path::Path::new(&tool.real_binary);
+            if !path.exists() {
+                results.push(format!(
+                    "Tool '{}': real_binary '{}' does not exist on the filesystem",
+                    name, tool.real_binary
+                ));
+            } else if !path.is_file() {
+                results.push(format!(
+                    "Tool '{}': real_binary '{}' exists but is not a file",
+                    name, tool.real_binary
+                ));
+            } else {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = path.metadata() {
+                    if metadata.permissions().mode() & 0o111 == 0 {
+                        results.push(format!(
+                            "Tool '{}': real_binary '{}' exists but is not executable",
+                            name, tool.real_binary
+                        ));
+                    }
+                }
+            }
+        }
+
+        results
+    }
 }
 
 #[cfg(test)]

@@ -42,8 +42,13 @@ sudo mkdir -p /etc/secure-sudoers
 sudo mv secure_sudoers_public_key.pem /etc/secure-sudoers/
 ```
 
-### 3. Create and Sign Policy
+### 3. Create, Validate, and Sign Policy
 Define tools and their restrictions in `/etc/secure-sudoers/policy.json`. See [POLICY.md](POLICY.md) for the full specification.
+
+Before signing, it is recommended to validate the policy for errors:
+```bash
+secure-sudoers-utils check /etc/secure-sudoers/policy.json
+```
 
 Once the policy is ready, sign it using the private key:
 ```bash
@@ -71,6 +76,7 @@ The `secure-sudoers-utils` tool provides several subcommands to manage the syste
 |---------------------------------|----------------------------------------------------------------------------------------|
 | `gen-keys`                      | Generates a new Ed25519 keypair.                                                       |
 | `sign <policy_path> <key_path>` | Signs a policy JSON file with a private key.                                           |
+| `check <policy_path>`           | Validates a policy JSON file for correctness and best practices.                       |
 | `install`                       | Sets up symlinks and sudoers configuration (requires `policy.json` and its signature). |
 | `unlock`                        | Removes the immutable bit from all managed files to allow for updates.                 |
 | `update <url> <pubkey_path>`    | Securely fetches and verifies policy updates over HTTPS.                               |

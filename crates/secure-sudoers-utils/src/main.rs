@@ -31,6 +31,8 @@ enum Commands {
     Install,
     /// Remove the immutable bit from all managed files
     Unlock,
+    /// Validate a policy JSON file for correctness and best practices
+    Check { policy_path: String },
     #[command(hide = true, name = "generate-man-page")]
     GenerateManPage,
 }
@@ -38,8 +40,10 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
-    if !matches!(cli.command, Commands::GenerateManPage)
-        && let Err(e) = secure_sudoers_utils::require_root()
+    if !matches!(
+        cli.command,
+        Commands::GenerateManPage | Commands::Check { .. }
+    ) && let Err(e) = secure_sudoers_utils::require_root()
     {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -55,11 +59,32 @@ fn main() {
         Commands::Update { url, pubkey_path } => network::run(&url, &pubkey_path),
         Commands::Install => installer::cmd_install(),
         Commands::Unlock => installer::cmd_unlock(),
+        Commands::Check { policy_path } => cmd_check(&policy_path),
         Commands::GenerateManPage => cmd_generate_man_page(),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+fn cmd_check(policy_path: &str) -> Result<(), String> {
+    let content = std::fs::read_to_string(policy_path)
+        .map_err(|e| format!("Cannot read {policy_path}: {e}"))?;
+
+    let mut policy: secure_sudoers_common::models::SecureSudoersPolicy =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse policy JSON: {e}"))?;
+
+    let issues = policy.lint();
+    if issues.is_empty() {
+        println!("Policy '{policy_path}' is valid.");
+        Ok(())
+    } else {
+        eprintln!("Policy '{policy_path}' has the following issues:");
+        for issue in issues {
+            eprintln!("  - {issue}");
+        }
+        Err("Policy check failed".to_string())
     }
 }
 
