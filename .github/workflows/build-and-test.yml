@@ -46,6 +46,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: tests/Dockerfile
           load: true
           tags: secure-sudoers-test:latest
           cache-from: type=gha
@@ -53,7 +54,7 @@ jobs:
       - name: Run Privileged Tests
         run: |
           docker run --rm --privileged -v ${{ github.workspace }}:/output secure-sudoers-test:latest \
-            bash -c "/workspace/run_privileged_tests.sh && cp /workspace/cobertura.xml /output/"
+            bash -c "/workspace/tests/run_privileged_tests.sh && cp /workspace/cobertura.xml /output/"
       - name: Upload Coverage Report
         uses: actions/upload-artifact@v4
         if: always()

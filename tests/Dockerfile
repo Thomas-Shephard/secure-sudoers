@@ -8,7 +8,7 @@ RUN rustup component add llvm-tools-preview \
     && cargo install cargo-llvm-cov --locked
 
 WORKDIR /workspace
-COPY .. .
+COPY . .
 
 RUN chmod +x /workspace/tests/run_privileged_tests.sh
 
