@@ -25,7 +25,7 @@ ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31", features = ["sched", "mount", "process", "term", "signal", "poll"] }
+nix = { version = "0.31", features = ["sched", "mount", "process", "term", "signal", "poll", "user"] }
 
 [package.metadata.deb]
 maintainer = "Thomas Shephard"

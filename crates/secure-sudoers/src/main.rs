@@ -26,17 +26,16 @@ fn main() {
 
     logging::init_logging(&policy.global_settings);
 
+    let user = resolve_user();
+
     let (tool_name, raw_args) = match parse_invocation(&raw_argv) {
         Ok(res) => res,
         Err(e) => {
+            error!(user = %user, "FATAL: {e}");
             eprintln!("FATAL: {e}");
             std::process::exit(1);
         }
     };
-
-    let user = std::env::var("SUDO_USER")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "unknown".to_string());
 
     let cmd = match validator::validate_command(&policy, &tool_name, raw_args.clone()) {
         Err(reason) => {
@@ -56,9 +55,49 @@ fn main() {
     match supervisor::run_supervisor(&cmd, &policy) {
         Ok(exit_code) => std::process::exit(exit_code),
         Err(e) => {
-            error!(tool = %tool_name, reason = %e, "Supervisor failed");
+            error!(tool = %tool_name, user = %user, reason = %e, "Supervisor failed");
             eprintln!("Execution failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+fn resolve_user() -> String {
+    use nix::unistd::{Uid, User, getuid};
+    use std::env;
+
+    let real_uid = getuid();
+
+    let real_user = User::from_uid(real_uid)
+        .ok()
+        .flatten()
+        .map(|u| u.name)
+        .unwrap_or_else(|| real_uid.to_string());
+
+    if real_uid.as_raw() == 0 {
+        let sudo_uid_str = env::var("SUDO_UID").ok();
+        let sudo_user_env = env::var("SUDO_USER").ok();
+
+        if let Some(uid_str) = sudo_uid_str {
+            if let Ok(uid_num) = uid_str.parse::<u32>() {
+                let sudo_uid = Uid::from_raw(uid_num);
+                if let Ok(Some(u)) = User::from_uid(sudo_uid) {
+                    return u.name;
+                }
+            }
+        }
+
+        if let Some(u) = sudo_user_env {
+            return u;
+        }
+
+        warn!(
+            uid = %real_uid,
+            "Running as root but SUDO_USER/SUDO_UID missing; identifying as '{}'",
+            real_user
+        );
+        real_user
+    } else {
+        real_user
     }
 }
