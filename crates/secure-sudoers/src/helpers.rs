@@ -1,23 +1,94 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use secure_sudoers_common::models::SecureSudoersPolicy;
 use std::path::Path;
+use tracing::{error, warn};
 
 const PUBLIC_KEY_PATH: &str = "/etc/secure-sudoers/secure_sudoers_public_key.pem";
 
-pub fn parse_invocation(raw_argv: &[String]) -> (String, Vec<String>) {
+pub fn parse_invocation(raw_argv: &[String]) -> Result<(String, Vec<String>), String> {
+    parse_invocation_internal(raw_argv, |v| std::env::var(v).ok())
+}
+
+fn parse_invocation_internal<F>(
+    raw_argv: &[String],
+    get_env: F,
+) -> Result<(String, Vec<String>), String>
+where
+    F: Fn(&str) -> Option<String>,
+{
     if raw_argv.is_empty() {
-        return (String::new(), vec![]);
+        return Ok((String::new(), vec![]));
     }
-    let exe_path = Path::new(&raw_argv[0]);
-    let exe_name = exe_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if exe_name == "secure-sudoers" || exe_name == "secure_sudoers" {
-        if raw_argv.len() < 2 {
-            (String::new(), vec![])
+
+    let (argv_tool_name, args) = {
+        let exe_path = Path::new(&raw_argv[0]);
+        let exe_name = exe_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if exe_name == "secure-sudoers" || exe_name == "secure_sudoers" {
+            if raw_argv.len() < 2 {
+                (String::new(), vec![])
+            } else {
+                (raw_argv[1].clone(), raw_argv[2..].to_vec())
+            }
         } else {
-            (raw_argv[1].clone(), raw_argv[2..].to_vec())
+            (exe_name.to_string(), raw_argv[1..].to_vec())
         }
-    } else {
-        (exe_name.to_string(), raw_argv[1..].to_vec())
+    };
+
+    match get_env("SUDO_COMMAND") {
+        Some(sudo_cmd) => {
+            let mut tokens = sudo_cmd.split_whitespace();
+            let first_token = tokens.next().unwrap_or("");
+            let first_path = Path::new(first_token);
+            let first_name = first_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(first_token);
+
+            let sudo_tool_name = if (first_name == "secure-sudoers"
+                || first_name == "secure_sudoers")
+                && !first_token.is_empty()
+            {
+                tokens
+                    .next()
+                    .map(|s| {
+                        Path::new(s)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(s)
+                    })
+                    .unwrap_or("")
+            } else {
+                first_name
+            };
+
+            let argv_tool_basename = Path::new(&argv_tool_name)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&argv_tool_name);
+            let sudo_tool_basename = Path::new(sudo_tool_name)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(sudo_tool_name);
+
+            if !sudo_tool_basename.is_empty() && sudo_tool_basename != argv_tool_basename {
+                error!(
+                    argv0 = %raw_argv[0],
+                    sudo_tool = %sudo_tool_basename,
+                    argv_tool = %argv_tool_basename,
+                    "CRITICAL: Spoofing attempt detected! Invocation mismatch with SUDO_COMMAND."
+                );
+                return Err(format!(
+                    "Spoofing attempt detected: command '{}' does not match SUDO_COMMAND '{}'",
+                    argv_tool_basename, sudo_tool_basename
+                ));
+            }
+
+            Ok((sudo_tool_basename.to_string(), args))
+        }
+        None => {
+            warn!("Tool is running outside of a secure Sudo context (SUDO_COMMAND missing)");
+            Ok((argv_tool_name, args))
+        }
     }
 }
 
@@ -124,11 +195,18 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
                 continue;
             }
 
-            redacted.push(arg.clone());
             if let Some(config) = tool.parameters.get(arg)
                 && config.sensitive
             {
+                redacted.push(arg.clone());
                 skip_next = true;
+            } else if let Some(ref pos_config) = tool.positional
+                && pos_config.sensitive
+                && !arg.starts_with('-')
+            {
+                redacted.push("[REDACTED]".to_string());
+            } else {
+                redacted.push(arg.clone());
             }
         }
         redacted
@@ -239,6 +317,18 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_args_sensitive_positional() {
+        let mut policy = make_policy();
+        if let Some(tool) = policy.tools.get_mut("apt") {
+            tool.positional = Some(ParameterConfig::string().sensitive());
+        }
+        let args = argv(&["install", "secret-pkg", "-y"]);
+        let redacted = redact_args(&args, &policy, "apt");
+
+        assert_eq!(redacted, argv(&["[REDACTED]", "[REDACTED]", "-y"]));
+    }
+
+    #[test]
     fn test_redact_args_with_equals_syntax() {
         let mut policy = make_policy();
         if let Some(tool) = policy.tools.get_mut("apt") {
@@ -277,7 +367,8 @@ mod tests {
 
     #[test]
     fn direct_invocation_extracts_tool_and_args() {
-        let (tool, args) = parse_invocation(&argv(&["secure-sudoers", "apt", "-y", "install"]));
+        let (tool, args) =
+            parse_invocation(&argv(&["secure-sudoers", "apt", "-y", "install"])).unwrap();
         assert_eq!(tool, "apt");
         assert_eq!(args, argv(&["-y", "install"]));
     }
@@ -285,30 +376,96 @@ mod tests {
     #[test]
     fn symlink_invocation_uses_basename_as_tool() {
         let (tool, args) =
-            parse_invocation(&argv(&["/usr/local/bin/apt", "-y", "install", "curl"]));
+            parse_invocation(&argv(&["/usr/local/bin/apt", "-y", "install", "curl"])).unwrap();
         assert_eq!(tool, "apt");
         assert_eq!(args, argv(&["-y", "install", "curl"]));
     }
 
     #[test]
     fn direct_invocation_without_args_returns_empty() {
-        let (tool, args) = parse_invocation(&argv(&["secure-sudoers"]));
+        let (tool, args) = parse_invocation(&argv(&["secure-sudoers"])).unwrap();
         assert_eq!(tool, "");
         assert!(args.is_empty());
     }
 
     #[test]
     fn symlink_invocation_without_args_returns_empty_args() {
-        let (tool, args) = parse_invocation(&argv(&["/usr/bin/tail"]));
+        let (tool, args) = parse_invocation(&argv(&["/usr/bin/tail"])).unwrap();
         assert_eq!(tool, "tail");
         assert!(args.is_empty());
     }
 
     #[test]
     fn underscore_variant_treated_as_direct() {
-        let (tool, args) = parse_invocation(&argv(&["secure_sudoers", "systemctl", "status"]));
+        let (tool, args) =
+            parse_invocation(&argv(&["secure_sudoers", "systemctl", "status"])).unwrap();
         assert_eq!(tool, "systemctl");
         assert_eq!(args, argv(&["status"]));
+    }
+
+    #[test]
+    fn sudo_command_prioritized_and_matches() {
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some("/usr/bin/apt install".to_string())
+            } else {
+                None
+            }
+        };
+        let (tool, args) =
+            parse_invocation_internal(&argv(&["secure-sudoers", "apt", "install"]), env).unwrap();
+        assert_eq!(tool, "apt");
+        assert_eq!(args, argv(&["install"]));
+    }
+
+    #[test]
+    fn sudo_command_mismatch_detected() {
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some("/usr/bin/evil".to_string())
+            } else {
+                None
+            }
+        };
+        let result = parse_invocation_internal(&argv(&["secure-sudoers", "apt", "install"]), env);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Spoofing attempt detected"));
+    }
+
+    #[test]
+    fn sudo_command_missing_falls_back() {
+        let env = |_: &str| -> Option<String> { None };
+        let (tool, _) = parse_invocation_internal(&argv(&["/usr/bin/tail", "file"]), env).unwrap();
+        assert_eq!(tool, "tail");
+    }
+
+    #[test]
+    fn sudo_command_basename_extraction() {
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some("/usr/local/bin/apt install".to_string())
+            } else {
+                None
+            }
+        };
+        let (tool, _) =
+            parse_invocation_internal(&argv(&["secure-sudoers", "/usr/bin/apt", "install"]), env)
+                .unwrap();
+        assert_eq!(tool, "apt");
+    }
+
+    #[test]
+    fn sudo_command_with_wrapper_skipped() {
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some("/usr/local/bin/secure-sudoers apt install".to_string())
+            } else {
+                None
+            }
+        };
+        let (tool, _) =
+            parse_invocation_internal(&argv(&["secure-sudoers", "apt", "install"]), env).unwrap();
+        assert_eq!(tool, "apt");
     }
 
     use ed25519_dalek::{Signer, SigningKey};

@@ -9,7 +9,6 @@ const POLICY_PATH: &str = "/etc/secure-sudoers/policy.json";
 
 fn main() {
     let raw_argv: Vec<String> = std::env::args().collect();
-    let (tool_name, raw_args) = parse_invocation(&raw_argv);
 
     #[cfg(debug_assertions)]
     let policy_path =
@@ -26,6 +25,14 @@ fn main() {
     };
 
     logging::init_logging(&policy.global_settings);
+
+    let (tool_name, raw_args) = match parse_invocation(&raw_argv) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("FATAL: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let user = std::env::var("SUDO_USER")
         .or_else(|_| std::env::var("USER"))
