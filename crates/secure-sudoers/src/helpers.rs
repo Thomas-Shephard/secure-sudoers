@@ -89,11 +89,11 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
 
             if let Some(idx) = arg.find('=') {
                 let key = &arg[..idx];
-                if let Some(config) = tool.parameters.get(key) {
-                    if config.sensitive {
-                        redacted.push(format!("{}=[REDACTED]", key));
-                        continue;
-                    }
+                if let Some(config) = tool.parameters.get(key)
+                    && config.sensitive
+                {
+                    redacted.push(format!("{}=[REDACTED]", key));
+                    continue;
                 }
             }
 
@@ -125,10 +125,10 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
             }
 
             redacted.push(arg.clone());
-            if let Some(config) = tool.parameters.get(arg) {
-                if config.sensitive {
-                    skip_next = true;
-                }
+            if let Some(config) = tool.parameters.get(arg)
+                && config.sensitive
+            {
+                skip_next = true;
             }
         }
         redacted

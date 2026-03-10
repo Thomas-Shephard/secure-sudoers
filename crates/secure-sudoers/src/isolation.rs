@@ -255,25 +255,23 @@ fn apply_readonly_mounts(paths: &[String]) -> Result<(), String> {
             MsFlags::MS_BIND,
             None::<&str>,
         );
-        if res1.is_ok() {
-            let res2 = mount(
-                Some(proc_path.as_str()),
-                proc_path.as_str(),
-                None::<&str>,
-                MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
-                None::<&str>,
-            );
-            unsafe { libc::close(fd_raw) };
-            res2.map_err(|e| {
-                format!("remount '{path_str}' via {proc_path} read-only failed: {e}")
-            })?;
-        } else {
+        if let Err(e) = res1 {
             unsafe { libc::close(fd_raw) };
             return Err(format!(
                 "bind mount on '{path_str}' via {proc_path} failed: {}",
-                res1.unwrap_err()
+                e
             ));
         }
+
+        let res2 = mount(
+            Some(proc_path.as_str()),
+            proc_path.as_str(),
+            None::<&str>,
+            MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+            None::<&str>,
+        );
+        unsafe { libc::close(fd_raw) };
+        res2.map_err(|e| format!("remount '{path_str}' via {proc_path} read-only failed: {e}"))?;
     }
     Ok(())
 }

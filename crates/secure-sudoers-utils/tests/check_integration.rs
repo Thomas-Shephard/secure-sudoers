@@ -38,7 +38,7 @@ fn test_check_command_on_valid_policy() {
     std::fs::write(&policy_path, policy_json).unwrap();
 
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "-p",
             "secure-sudoers-utils",
@@ -81,7 +81,7 @@ fn test_check_command_on_invalid_policy_missing_binary() {
     std::fs::write(&policy_path, policy_json).unwrap();
 
     let output = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "-p",
             "secure-sudoers-utils",

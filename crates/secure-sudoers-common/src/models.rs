@@ -72,10 +72,10 @@ pub struct ParameterConfig {
 
 impl ParameterConfig {
     pub fn matches(&self, val: &str) -> bool {
-        if let Some(ref choices) = self.choices {
-            if !choices.contains(&val.to_string()) {
-                return false;
-            }
+        if let Some(ref choices) = self.choices
+            && !choices.contains(&val.to_string())
+        {
+            return false;
         }
         if let Some(ref regex_str) = self.regex {
             if let Ok(re) = regex::Regex::new(regex_str) {
@@ -327,24 +327,23 @@ impl SecureSudoersPolicy {
                 ));
             }
             for (flag, config) in &tool.parameters {
-                if let Some(ref regex_str) = config.regex {
-                    if regex::Regex::new(regex_str).is_err() {
-                        return Err(format!(
-                            "Invalid regex '{}' in parameter '{}' for tool '{}'",
-                            regex_str, flag, name
-                        ));
-                    }
+                if let Some(ref regex_str) = config.regex
+                    && regex::Regex::new(regex_str).is_err()
+                {
+                    return Err(format!(
+                        "Invalid regex '{}' in parameter '{}' for tool '{}'",
+                        regex_str, flag, name
+                    ));
                 }
             }
-            if let Some(ref pos_config) = tool.positional {
-                if let Some(ref regex_str) = pos_config.regex {
-                    if regex::Regex::new(regex_str).is_err() {
-                        return Err(format!(
-                            "Invalid regex '{}' in positional config for tool '{}'",
-                            regex_str, name
-                        ));
-                    }
-                }
+            if let Some(ref pos_config) = tool.positional
+                && let Some(ref regex_str) = pos_config.regex
+                && regex::Regex::new(regex_str).is_err()
+            {
+                return Err(format!(
+                    "Invalid regex '{}' in positional config for tool '{}'",
+                    regex_str, name
+                ));
             }
         }
         Ok(())
@@ -372,13 +371,13 @@ impl SecureSudoersPolicy {
                 ));
             } else {
                 use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = path.metadata() {
-                    if metadata.permissions().mode() & 0o111 == 0 {
-                        results.push(format!(
-                            "Tool '{}': real_binary '{}' exists but is not executable",
-                            name, tool.real_binary
-                        ));
-                    }
+                if let Ok(metadata) = path.metadata()
+                    && metadata.permissions().mode() & 0o111 == 0
+                {
+                    results.push(format!(
+                        "Tool '{}': real_binary '{}' exists but is not executable",
+                        name, tool.real_binary
+                    ));
                 }
             }
         }
