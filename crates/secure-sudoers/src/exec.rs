@@ -2,18 +2,24 @@ use nix::unistd::fexecve;
 use secure_sudoers_common::models::SecureSudoersPolicy;
 use secure_sudoers_common::validator::ValidatedCommand;
 use std::ffi::CString;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::fd::FromRawFd;
 use std::path::Path;
 
 pub fn execute_securely(
     cmd: &ValidatedCommand,
     policy: &SecureSudoersPolicy,
 ) -> Result<(), String> {
-    let binary_file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC)
-        .open(cmd.binary())
-        .map_err(|e| format!("Failed to open binary '{}': {e}", cmd.binary()))?;
+    use std::os::fd::AsRawFd;
+
+    // Use the already opened FD from the validation phase to prevent TOCTOU
+    let binary_fd_raw = unsafe { libc::dup(cmd.binary().fd.as_raw_fd()) };
+    if binary_fd_raw < 0 {
+        return Err(format!(
+            "Failed to duplicate binary FD: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let binary_file = unsafe { std::fs::File::from_raw_fd(binary_fd_raw) };
 
     let clean_env = build_scrubbed_env(cmd.env_whitelist());
 
@@ -27,18 +33,19 @@ pub fn execute_securely(
 
     crate::isolation::drop_capabilities().map_err(|e| format!("Capability drop failed: {e}"))?;
 
-    let binary_name = Path::new(cmd.binary())
+    let binary_name = Path::new(&cmd.binary().path)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or(cmd.binary());
+        .unwrap_or(&cmd.binary().path);
     let mut argv: Vec<CString> = Vec::with_capacity(1 + cmd.args().len());
     argv.push(
         CString::new(binary_name).map_err(|e| format!("Binary name contains NUL byte: {e}"))?,
     );
     for arg in cmd.args() {
+        let arg_str = arg.as_str();
         argv.push(
-            CString::new(arg.as_str())
-                .map_err(|e| format!("Argument '{arg}' contains NUL byte: {e}"))?,
+            CString::new(arg_str)
+                .map_err(|e| format!("Argument '{}' contains NUL byte: {e}", arg_str))?,
         );
     }
 

@@ -1,21 +1,61 @@
-use crate::models::{SecureSudoersPolicy, ValidationContext};
+use crate::models::{SecurePath, SecureSudoersPolicy, ValidationContext};
 use regex::Regex;
 
 mod helpers;
 
 #[derive(Debug)]
+pub enum ValidatedArg {
+    String(String),
+    Path(SecurePath),
+}
+
+impl PartialEq<str> for ValidatedArg {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for ValidatedArg {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for ValidatedArg {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl ValidatedArg {
+    pub fn as_str(&self) -> &str {
+        match self {
+            ValidatedArg::String(s) => s,
+            ValidatedArg::Path(p) => &p.path,
+        }
+    }
+
+    pub fn path(&self) -> Option<&SecurePath> {
+        match self {
+            ValidatedArg::Path(p) => Some(p),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct ValidatedCommand {
-    binary: String,
-    args: Vec<String>,
+    binary: SecurePath,
+    args: Vec<ValidatedArg>,
     isolation: crate::models::IsolationSettings,
     env_whitelist: Vec<String>,
 }
 
 impl ValidatedCommand {
-    pub fn binary(&self) -> &str {
+    pub fn binary(&self) -> &SecurePath {
         &self.binary
     }
-    pub fn args(&self) -> &[String] {
+    pub fn args(&self) -> &[ValidatedArg] {
         &self.args
     }
     pub fn isolation(&self) -> &crate::models::IsolationSettings {
@@ -29,13 +69,13 @@ impl ValidatedCommand {
 #[cfg(feature = "testing")]
 impl ValidatedCommand {
     pub fn new_for_testing(
-        binary: &str,
-        args: Vec<String>,
+        binary: SecurePath,
+        args: Vec<ValidatedArg>,
         isolation: crate::models::IsolationSettings,
         env_whitelist: Vec<String>,
     ) -> Self {
         ValidatedCommand {
-            binary: binary.to_string(),
+            binary,
             args,
             isolation,
             env_whitelist,
@@ -53,10 +93,16 @@ pub fn validate_command(
         .get(tool_name)
         .ok_or_else(|| format!("Tool '{}' is not permitted by policy", tool_name))?;
 
+    let binary_path = crate::fs::check_path(
+        &tool.real_binary,
+        &ValidationContext::Positional,
+        &policy.global_settings.blocked_paths,
+    )?;
+
     let safe_re = Regex::new(&policy.global_settings.safe_arg_regex)
         .map_err(|_| "Policy contains invalid safe_arg_regex".to_string())?;
 
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<ValidatedArg> = Vec::new();
     let mut iter = raw_args.into_iter().peekable();
 
     if !tool.verbs.is_empty() {
@@ -69,7 +115,7 @@ pub fn validate_command(
                 verb, tool_name
             ));
         }
-        out.push(verb);
+        out.push(ValidatedArg::String(verb));
     }
 
     let v_params = helpers::ValidationParams {
@@ -132,7 +178,7 @@ pub fn validate_command(
     };
 
     Ok(ValidatedCommand {
-        binary: tool.real_binary.clone(),
+        binary: binary_path,
         args: out,
         isolation,
         env_whitelist,
@@ -153,14 +199,17 @@ mod tests {
     #[test]
     fn test_valid_verb_accepted() {
         let cmd = validate_command(&make_policy(), "apt", args(&["install"])).unwrap();
-        assert_eq!(cmd.binary(), "/usr/bin/apt");
+        assert!(
+            cmd.binary().path.ends_with("/usr/bin/apt") || cmd.binary().path.ends_with("/bin/apt")
+        );
     }
 
     #[test]
     fn test_clustered_flags_deconstructed() {
         let cmd = validate_command(&make_policy(), "apt", args(&["install", "-ya"])).unwrap();
-        assert!(cmd.args().contains(&"-y".to_string()));
-        assert!(cmd.args().contains(&"-a".to_string()));
+        let arg_strs: Vec<String> = cmd.args().iter().map(|a| a.as_str().to_string()).collect();
+        assert!(arg_strs.contains(&"-y".to_string()));
+        assert!(arg_strs.contains(&"-a".to_string()));
     }
 
     #[test]
@@ -172,7 +221,7 @@ mod tests {
     #[test]
     fn test_attached_short_flags() {
         let mut p = make_policy();
-        let mut tool = make_tool("/usr/bin/test");
+        let mut tool = make_tool("/usr/bin/true");
         tool.parameters.insert("-v".into(), ParameterConfig::bool());
         tool.parameters
             .insert("-p".into(), ParameterConfig::string());
@@ -182,10 +231,12 @@ mod tests {
         p.tools.insert("test".to_string(), tool);
 
         let cmd1 = validate_command(&p, "test", args(&["-pVALUE"])).unwrap();
-        assert_eq!(cmd1.args(), args(&["-p", "VALUE"]));
+        let arg_strs: Vec<String> = cmd1.args().iter().map(|a| a.as_str().to_string()).collect();
+        assert_eq!(arg_strs, args(&["-p", "VALUE"]));
 
         let cmd2 = validate_command(&p, "test", args(&["-vpVALUE"])).unwrap();
-        assert_eq!(cmd2.args(), args(&["-v", "-p", "VALUE"]));
+        let arg_strs2: Vec<String> = cmd2.args().iter().map(|a| a.as_str().to_string()).collect();
+        assert_eq!(arg_strs2, args(&["-v", "-p", "VALUE"]));
 
         assert!(validate_command(&p, "test", args(&["-P/etc/shadow"])).is_err());
     }
@@ -193,7 +244,7 @@ mod tests {
     #[test]
     fn test_flag_with_equals_syntax() {
         let mut p = make_policy();
-        let mut tool = make_tool("/usr/local/bin/deploy");
+        let mut tool = make_tool("/usr/bin/true");
         tool.parameters
             .insert("--target".into(), ParameterConfig::string());
         tool.parameters
@@ -203,10 +254,12 @@ mod tests {
         p.tools.insert("deploy".to_string(), tool);
 
         let cmd1 = validate_command(&p, "deploy", args(&["--target=PROD"])).unwrap();
-        assert_eq!(cmd1.args(), args(&["--target", "PROD"]));
+        let arg_strs: Vec<String> = cmd1.args().iter().map(|a| a.as_str().to_string()).collect();
+        assert_eq!(arg_strs, args(&["--target", "PROD"]));
 
         let cmd2 = validate_command(&p, "deploy", args(&["-p=HELLO"])).unwrap();
-        assert_eq!(cmd2.args(), args(&["-p", "HELLO"]));
+        let arg_strs2: Vec<String> = cmd2.args().iter().map(|a| a.as_str().to_string()).collect();
+        assert_eq!(arg_strs2, args(&["-p", "HELLO"]));
     }
 
     #[test]
@@ -254,7 +307,7 @@ mod tests {
     #[test]
     fn test_flag_argument_redaction() {
         let mut p = make_policy();
-        let mut tool = make_tool("/usr/bin/login");
+        let mut tool = make_tool("/usr/bin/true");
         tool.parameters.insert(
             "--secret".into(),
             ParameterConfig::string()
@@ -289,12 +342,23 @@ mod tests {
     #[test]
     fn test_path_regex_validation() {
         let mut p = make_policy();
-        let mut tool = make_tool("/bin/ls");
-        tool.positional = Some(ParameterConfig::path().regex("^/tmp/.*".to_string()));
+        let ls_bin = std::fs::canonicalize("/bin/ls").unwrap_or_else(|_| "/usr/bin/ls".into());
+        let mut tool = make_tool(ls_bin.to_str().unwrap());
+        let tmp = std::env::temp_dir();
+        // Construct a path that will be under /tmp or /private/tmp
+        let path_buf = tmp.join("secure_sudoers_test_foo");
+        let path = path_buf.to_str().unwrap();
+        std::fs::write(path, "test").unwrap();
+
+        // Get the path as it will be returned by check_path
+        let dummy_context = ValidationContext::Positional;
+        let secure_path = crate::fs::check_path(path, &dummy_context, &[]).unwrap();
+
+        // Use that exact path in the regex
+        let regex = format!("^{}$", regex::escape(&secure_path.path));
+        tool.positional = Some(ParameterConfig::path().regex(regex));
         p.tools.insert("ls".to_string(), tool);
 
-        let path = "/tmp/secure_sudoers_test_foo";
-        std::fs::write(path, "test").unwrap();
         assert!(validate_command(&p, "ls", args(&[path])).is_ok());
         assert!(validate_command(&p, "ls", args(&["/etc/passwd"])).is_err());
         let _ = std::fs::remove_file(path);
@@ -306,21 +370,42 @@ mod tests {
         let tmp = std::env::temp_dir();
         let real_file = tmp.join("secure_sudoers_regex_real");
         let symlink_file = tmp.join("secure_sudoers_regex_symlink");
+        let dummy_bin = tmp.join("secure_sudoers_dummy_bin");
 
         let _ = std::fs::remove_file(&real_file);
         let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&dummy_bin);
 
         std::fs::write(&real_file, "test").unwrap();
         std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+        // Create a regular file for the tool binary
+        std::fs::write(&dummy_bin, "bin").unwrap();
 
-        let mut tool = make_tool("/bin/cat");
-        let regex = format!("^{}/.*", tmp.to_str().unwrap());
+        let dummy_bin_str = dummy_bin.to_str().unwrap();
+        let mut tool = make_tool(dummy_bin_str);
+
+        // Get the canonical path of the real file
+        let secure_real = crate::fs::check_path(
+            real_file.to_str().unwrap(),
+            &ValidationContext::Positional,
+            &[],
+        )
+        .unwrap();
+
+        // Regex should match the canonical path
+        let regex = format!("^{}$", regex::escape(&secure_real.path));
         tool.positional = Some(ParameterConfig::path().regex(regex));
         p.tools.insert("cat".to_string(), tool);
 
-        assert!(validate_command(&p, "cat", args(&[symlink_file.to_str().unwrap()])).is_ok());
+        let result = validate_command(&p, "cat", args(&[symlink_file.to_str().unwrap()]));
+        assert!(
+            result.is_ok(),
+            "Failed to validate command: {:?}",
+            result.err()
+        );
 
-        let mut tool2 = make_tool("/bin/cat");
+        let mut tool2 = make_tool(dummy_bin_str);
+        // This should fail because the canonical path will not end in 'symlink'
         tool2.positional = Some(ParameterConfig::path().regex(".+symlink$".to_string()));
         p.tools.insert("cat2".to_string(), tool2);
 
@@ -328,6 +413,7 @@ mod tests {
 
         let _ = std::fs::remove_file(&symlink_file);
         let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&dummy_bin);
     }
 }
 

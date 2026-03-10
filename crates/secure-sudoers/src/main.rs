@@ -41,7 +41,7 @@ fn main() {
         }
         Ok(cmd) => {
             let redacted = redact_args(&raw_args, &policy, &tool_name);
-            info!(tool = %tool_name, binary = cmd.binary(), args = ?redacted, user = %user, "Command approved");
+            info!(tool = %tool_name, binary = %cmd.binary().path, args = ?redacted, user = %user, "Command approved");
             cmd
         }
     };

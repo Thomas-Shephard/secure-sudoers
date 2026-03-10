@@ -418,6 +418,7 @@ mod tests {
     }
 
     use crate::require_root;
+    use secure_sudoers_common::testing::fixtures::open_path;
 
     #[test]
     fn test_run_supervisor_true_exits_zero() {
@@ -425,14 +426,14 @@ mod tests {
 
         use crate::supervisor::run_supervisor;
         use secure_sudoers_common::models::IsolationSettings;
-        use secure_sudoers_common::testing::fixtures::make_policy;
         use secure_sudoers_common::validator::ValidatedCommand;
 
-        let true_bin = if Path::new("/usr/bin/true").exists() {
+        let true_bin_str = if Path::new("/usr/bin/true").exists() {
             "/usr/bin/true"
         } else {
             "/bin/true"
         };
+        let true_bin = open_path(true_bin_str);
 
         let cmd = ValidatedCommand::new_for_testing(
             true_bin,

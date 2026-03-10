@@ -1,5 +1,54 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::os::fd::OwnedFd;
+
+pub struct SecurePath {
+    pub path: String,
+    pub fd: OwnedFd,
+}
+
+impl PartialEq for SecurePath {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl PartialEq<str> for SecurePath {
+    fn eq(&self, other: &str) -> bool {
+        self.path == other
+    }
+}
+
+impl PartialEq<&str> for SecurePath {
+    fn eq(&self, other: &&str) -> bool {
+        self.path == *other
+    }
+}
+
+impl PartialEq<String> for SecurePath {
+    fn eq(&self, other: &String) -> bool {
+        self.path == *other
+    }
+}
+
+impl SecurePath {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_for_testing(path: &str, fd: OwnedFd) -> Self {
+        Self {
+            path: path.to_string(),
+            fd,
+        }
+    }
+}
+
+impl std::fmt::Debug for SecurePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurePath")
+            .field("path", &self.path)
+            .field("fd", &self.fd)
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

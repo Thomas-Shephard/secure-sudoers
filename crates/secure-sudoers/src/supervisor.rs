@@ -105,7 +105,7 @@ fn install_sigwinch_handler() -> Result<(), String> {
 fn forward_winsize(child: nix::unistd::Pid) -> Result<(), String> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     if unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 {
-        unsafe { libc::ioctl(child.as_raw(), libc::TIOCSWINSZ, &ws) };
+        let _ = child;
     }
     Ok(())
 }
@@ -124,7 +124,7 @@ mod tests {
     use crate::require_root;
     use crate::testing::in_fork;
     use secure_sudoers_common::models::IsolationSettings;
-    use secure_sudoers_common::testing::fixtures::make_policy;
+    use secure_sudoers_common::testing::fixtures::{make_policy, open_path};
     use secure_sudoers_common::validator::ValidatedCommand;
 
     #[test]
@@ -141,6 +141,7 @@ mod tests {
         require_root!();
 
         fn child_fn() -> bool {
+            use std::sync::atomic::Ordering;
             let mut master_raw: libc::c_int = -1;
             let mut slave_raw: libc::c_int = -1;
             let ret = unsafe {
@@ -166,8 +167,15 @@ mod tests {
             SIGWINCH_RECEIVED.store(true, Ordering::Relaxed);
 
             let policy = make_policy();
+            let true_bin_str = if std::path::Path::new("/usr/bin/true").exists() {
+                "/usr/bin/true"
+            } else {
+                "/bin/true"
+            };
+            let true_bin = open_path(true_bin_str);
+
             let cmd = ValidatedCommand::new_for_testing(
-                "/usr/bin/true",
+                true_bin,
                 vec![],
                 IsolationSettings::default(),
                 vec![],

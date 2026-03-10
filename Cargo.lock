@@ -1308,6 +1308,7 @@ name = "secure-sudoers-common"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "libc",
  "proptest",
  "regex",
  "serde",

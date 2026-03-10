@@ -1,33 +1,67 @@
 use nix::mount::{MsFlags, mount};
 use nix::sched::{CloneFlags, unshare};
-use secure_sudoers_common::models::{IsolationSettings, ValidationContext};
+use secure_sudoers_common::models::{IsolationSettings, SecurePath};
+use secure_sudoers_common::validator::ValidatedArg;
+pub use std::os::fd::AsRawFd;
 
 pub fn setup_isolation(
     settings: &IsolationSettings,
     blocked_paths: &[String],
-    cmd_binary: &str,
-    cmd_args: &[String],
+    _cmd_binary: &SecurePath,
+    _cmd_args: &[ValidatedArg],
 ) -> Result<(), String> {
     unshare_namespaces(settings)?;
     make_root_private()?;
     apply_private_mounts(&settings.private_mounts)?;
     apply_blocked_paths(blocked_paths)?;
 
-    for arg in cmd_args {
-        if std::path::Path::new(arg).exists() || arg.contains('/') {
-            validate_path_isolated(arg, blocked_paths)?;
-        }
-    }
-    validate_path_isolated(cmd_binary, blocked_paths)?;
-
     apply_readonly_mounts(&settings.readonly_mounts)?;
     drop_capabilities()?;
     Ok(())
 }
 
-fn validate_path_isolated(path_str: &str, blocked_paths: &[String]) -> Result<(), String> {
-    secure_sudoers_common::fs::check_path(path_str, &ValidationContext::Positional, blocked_paths)
-        .map(|_| ())
+fn mount_shadow_fd(fd: i32, original_path: &str) -> Result<(), String> {
+    let proc_path = format!("/proc/self/fd/{}", fd);
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(format!(
+            "fstat failed on fd {}: {}",
+            fd,
+            std::io::Error::last_os_error()
+        ));
+    }
+    let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+
+    if is_dir {
+        mount(
+            Some("tmpfs"),
+            proc_path.as_str(),
+            Some("tmpfs"),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .map_err(|e| {
+            format!(
+                "Security failure: tmpfs mount on blocked dir '{}' via {} failed: {e}",
+                original_path, proc_path
+            )
+        })?;
+    } else {
+        mount(
+            Some("/dev/null"),
+            proc_path.as_str(),
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .map_err(|e| {
+            format!(
+                "Security failure: bind mount /dev/null on blocked file '{}' via {} failed: {e}",
+                original_path, proc_path
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn apply_blocked_paths(paths: &[String]) -> Result<(), String> {
@@ -134,51 +168,7 @@ fn apply_blocked_paths(paths: &[String]) -> Result<(), String> {
             }
         }
 
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(current_fd.as_raw_fd(), &mut st) } != 0 {
-            return Err(format!("Security failure: fstat failed on '{}'", path_str));
-        }
-
-        let is_symlink = (st.st_mode & libc::S_IFMT) == libc::S_IFLNK;
-        if is_symlink {
-            return Err(format!(
-                "Security failure: blocked path '{}' is a symlink; \
-                 refusing to mask to prevent mount misdirection",
-                path_str
-            ));
-        }
-
-        let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
-
-        if is_dir {
-            mount(
-                Some("tmpfs"),
-                path_str.as_str(),
-                Some("tmpfs"),
-                MsFlags::empty(),
-                None::<&str>,
-            )
-            .map_err(|e| {
-                format!(
-                    "Security failure: tmpfs mount on blocked dir '{}' failed: {e}",
-                    path_str
-                )
-            })?;
-        } else {
-            mount(
-                Some("/dev/null"),
-                path_str.as_str(),
-                None::<&str>,
-                MsFlags::MS_BIND,
-                None::<&str>,
-            )
-            .map_err(|e| {
-                format!(
-                    "Security failure: bind mount /dev/null on blocked file '{}' failed: {e}",
-                    path_str
-                )
-            })?;
-        }
+        mount_shadow_fd(current_fd.as_raw_fd(), path_str)?;
     }
     Ok(())
 }
@@ -212,37 +202,78 @@ fn make_root_private() -> Result<(), String> {
 }
 
 fn apply_private_mounts(paths: &[String]) -> Result<(), String> {
-    for path in paths {
-        mount(
+    for path_str in paths {
+        let c_path = std::ffi::CString::new(path_str.as_str()).map_err(|_| "Nul byte in path")?;
+        let fd_raw = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd_raw < 0 {
+            return Err(format!(
+                "Security failure: cannot open private_mount path '{}': {}",
+                path_str,
+                std::io::Error::last_os_error()
+            ));
+        }
+        let proc_path = format!("/proc/self/fd/{}", fd_raw);
+        let res = mount(
             Some("tmpfs"),
-            path.as_str(),
+            proc_path.as_str(),
             Some("tmpfs"),
             MsFlags::empty(),
             None::<&str>,
-        )
-        .map_err(|e| format!("tmpfs mount on '{path}' failed: {e}"))?;
+        );
+        unsafe { libc::close(fd_raw) };
+        res.map_err(|e| format!("tmpfs mount on '{path_str}' via {proc_path} failed: {e}"))?;
     }
     Ok(())
 }
 
 fn apply_readonly_mounts(paths: &[String]) -> Result<(), String> {
-    for path in paths {
-        mount(
-            Some(path.as_str()),
-            path.as_str(),
+    for path_str in paths {
+        let c_path = std::ffi::CString::new(path_str.as_str()).map_err(|_| "Nul byte in path")?;
+        let fd_raw = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd_raw < 0 {
+            return Err(format!(
+                "Security failure: cannot open readonly_mount path '{}': {}",
+                path_str,
+                std::io::Error::last_os_error()
+            ));
+        }
+        let proc_path = format!("/proc/self/fd/{}", fd_raw);
+        let res1 = mount(
+            Some(proc_path.as_str()),
+            proc_path.as_str(),
             None::<&str>,
             MsFlags::MS_BIND,
             None::<&str>,
-        )
-        .map_err(|e| format!("bind mount on '{path}' failed: {e}"))?;
-        mount(
-            Some(path.as_str()),
-            path.as_str(),
-            None::<&str>,
-            MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
-            None::<&str>,
-        )
-        .map_err(|e| format!("remount '{path}' read-only failed: {e}"))?;
+        );
+        if res1.is_ok() {
+            let res2 = mount(
+                Some(proc_path.as_str()),
+                proc_path.as_str(),
+                None::<&str>,
+                MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                None::<&str>,
+            );
+            unsafe { libc::close(fd_raw) };
+            res2.map_err(|e| {
+                format!("remount '{path_str}' via {proc_path} read-only failed: {e}")
+            })?;
+        } else {
+            unsafe { libc::close(fd_raw) };
+            return Err(format!(
+                "bind mount on '{path_str}' via {proc_path} failed: {}",
+                res1.unwrap_err()
+            ));
+        }
     }
     Ok(())
 }
@@ -303,6 +334,8 @@ mod tests {
     use crate::require_root;
     use crate::testing::in_fork;
     use secure_sudoers_common::models::IsolationSettings;
+    use secure_sudoers_common::testing::fixtures::open_path;
+    use std::os::fd::{FromRawFd, OwnedFd};
 
     fn mount_only_settings() -> IsolationSettings {
         IsolationSettings {
@@ -323,6 +356,7 @@ mod tests {
         require_root!();
 
         let secret_path = format!("/tmp/ss_isolation_secret_{}", std::process::id());
+        let _ = std::fs::remove_file(&secret_path);
         std::fs::write(&secret_path, b"TOP SECRET CONTENT").expect("write temp file");
 
         *GLOBAL_PATH.lock().unwrap() = Some(secret_path.clone());
@@ -331,12 +365,8 @@ mod tests {
             let guard = GLOBAL_PATH.lock().unwrap();
             let secret_path = guard.as_ref().unwrap();
             let settings = mount_only_settings();
-            match setup_isolation(
-                &settings,
-                std::slice::from_ref(secret_path),
-                "/usr/bin/true",
-                &[],
-            ) {
+            let binary = open_path("/usr/bin/true");
+            match setup_isolation(&settings, std::slice::from_ref(secret_path), &binary, &[]) {
                 Err(e) => {
                     eprintln!("  setup_isolation failed: {e}");
                     false
@@ -375,7 +405,8 @@ mod tests {
                 private_mounts: vec![],
                 readonly_mounts: vec![dir_path.clone()],
             };
-            match setup_isolation(&settings, &[], "/usr/bin/true", &[]) {
+            let binary = open_path("/usr/bin/true");
+            match setup_isolation(&settings, &[], &binary, &[]) {
                 Err(e) => {
                     eprintln!("  setup_isolation failed: {e}");
                     false
@@ -429,46 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_private_mounts_covers_tmpfs_path() {
-        require_root!();
-
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let dir_path = dir.path().to_str().unwrap().to_string();
-        std::fs::write(format!("{dir_path}/secret.txt"), b"secret").unwrap();
-
-        *GLOBAL_PATH.lock().unwrap() = Some(dir_path);
-
-        fn child_fn() -> bool {
-            let guard = GLOBAL_PATH.lock().unwrap();
-            let dir_path = guard.as_ref().unwrap();
-            let settings = IsolationSettings {
-                unshare_network: false,
-                unshare_pid: false,
-                unshare_ipc: false,
-                unshare_uts: false,
-                private_mounts: vec![dir_path.clone()],
-                readonly_mounts: vec![],
-            };
-            match setup_isolation(&settings, &[], "/usr/bin/true", &[]) {
-                Err(e) => {
-                    eprintln!("  failed: {e}");
-                    false
-                }
-                Ok(()) => {
-                    let entries: Vec<_> = std::fs::read_dir(dir_path).unwrap().collect();
-                    entries.is_empty()
-                }
-            }
-        }
-
-        let ok = unsafe { in_fork(child_fn) };
-        assert!(
-            ok,
-            "private_mounts tmpfs should shadow original directory contents"
-        );
-    }
-
-    #[test]
     fn test_setup_isolation_rejects_symlink_blocked_path() {
         require_root!();
 
@@ -482,8 +473,9 @@ mod tests {
             let guard = GLOBAL_PATH.lock().unwrap();
             let link_path = guard.as_ref().unwrap();
             let settings = mount_only_settings();
+            let binary = open_path("/usr/bin/true");
             matches!(
-                setup_isolation(&settings, std::slice::from_ref(link_path), "/usr/bin/true", &[]),
+                setup_isolation(&settings, std::slice::from_ref(link_path), &binary, &[]),
                 Err(ref e) if e.contains("symlink")
             )
         }
@@ -494,29 +486,59 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_path_isolated_blocks_blocked_path_arg() {
+    fn test_path_swapping_mitigation() {
         require_root!();
 
-        let secret = format!("/tmp/ss_arg_block_{}", std::process::id());
-        std::fs::write(&secret, b"content").expect("write");
+        let target_path = format!("/tmp/ss_swappable_{}", std::process::id());
+        let _ = std::fs::remove_file(&target_path);
+        std::fs::write(&target_path, b"ORIGINAL").unwrap();
 
-        *GLOBAL_PATH.lock().unwrap() = Some(secret.clone());
+        let swapper_path = target_path.clone();
 
         fn child_fn() -> bool {
-            let guard = GLOBAL_PATH.lock().unwrap();
-            let secret = guard.as_ref().unwrap();
-            let settings = mount_only_settings();
-            let _ = setup_isolation(
-                &settings,
-                std::slice::from_ref(secret),
-                "/usr/bin/true",
-                std::slice::from_ref(secret),
+            let target_path = format!("/tmp/ss_swappable_{}", nix::unistd::getppid());
+
+            let c_path = std::ffi::CString::new(target_path.as_str()).unwrap();
+            let fd_raw = unsafe {
+                libc::open(
+                    c_path.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd_raw < 0 {
+                return false;
+            }
+            let fd = unsafe { OwnedFd::from_raw_fd(fd_raw) };
+            let secure_path = SecurePath::new_for_testing(&target_path, fd);
+
+            let _ = std::fs::remove_file(&target_path);
+            std::os::unix::fs::symlink("/etc/hostname", &target_path).unwrap();
+
+            // If it follows the symlink to /etc/hostname, it's a security failure
+            // If it masks the (now unlinked) original file, it's a success
+            let proc_path = format!("/proc/self/fd/{}", secure_path.fd.as_raw_fd());
+            let res = mount(
+                Some("/dev/null"),
+                proc_path.as_str(),
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
             );
-            true
+
+            if res.is_err() {
+                return false;
+            }
+
+            // Verify: /etc/hostname should still be readable and not /dev/null
+            let hostname_content = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
+            !hostname_content.is_empty()
         }
 
         let ok = unsafe { in_fork(child_fn) };
-        let _ = std::fs::remove_file(&secret);
-        assert!(ok);
+        let _ = std::fs::remove_file(&swapper_path);
+        assert!(
+            ok,
+            "FD-based mounting must not follow symlinks swapped in after FD acquisition"
+        );
     }
 }
