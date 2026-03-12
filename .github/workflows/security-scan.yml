@@ -19,12 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny@0.16.1
-      - name: Run cargo-deny check (Advisories, Licenses, Bans)
+        uses: taiki-e/install-action@cargo-deny
+      - name: Run cargo-deny check
         run: |
-          cargo deny check --format sarif advisories licenses bans sources > cargo-deny.sarif || true
+          cargo deny check advisories licenses bans sources --format sarif > cargo-deny.sarif || true
       - name: Upload SARIF file
         uses: github/codeql-action/upload-sarif@v4
         with:
