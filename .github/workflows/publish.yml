@@ -45,6 +45,8 @@ jobs:
       - name: Install cargo-zigbuild
         if: matrix.use_zigbuild
         run: pip install --user cargo-zigbuild
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx
       - name: Cache Cargo and Zig
         uses: actions/cache@v4
         with:
@@ -69,12 +71,18 @@ jobs:
           cargo zigbuild -p secure-sudoers-utils --release --features network-update --target ${{ matrix.target }} --verbose
         env:
           CARGO_PROFILE_RELEASE_LTO: "false"
-      - name: Stage binaries
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          cargo cyclonedx -p secure-sudoers --output-format json --target ${{ matrix.target }}
+          cargo cyclonedx -p secure-sudoers-utils --output-format json --target ${{ matrix.target }}
+      - name: Stage binaries and SBOMs
         run: |
           mkdir -p dist
           BIN_DIR="target/${{ matrix.target }}/release"
           cp "${BIN_DIR}/secure-sudoers" "dist/secure-sudoers-${{ matrix.bin_suffix }}"
           cp "${BIN_DIR}/secure-sudoers-utils" "dist/secure-sudoers-utils-${{ matrix.bin_suffix }}"
+
+          mv *.cdx.json dist/
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
