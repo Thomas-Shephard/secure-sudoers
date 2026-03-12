@@ -116,12 +116,24 @@ fn process_flag_with_value(
 
                 if is_path {
                     let context = ValidationContext::Flag(flag_name.to_string());
-                    let secure_path = check_path(&val, &context, params.blocked_paths)?;
+                    let secure_path =
+                        check_path(&val, &context, params.blocked_paths).map_err(|e| {
+                            if config.sensitive {
+                                "Access to a sensitive path was denied".to_string()
+                            } else {
+                                e
+                            }
+                        })?;
                     // Re-check regex against canonical path if it exists
                     if !config.matches(&secure_path.path) {
+                        let display_path = if config.sensitive {
+                            "[REDACTED]"
+                        } else {
+                            &secure_path.path
+                        };
                         return Err(format!(
                             "Flag '{}' canonical path '{}' is not permitted by policy regex",
-                            flag_name, secure_path.path
+                            flag_name, display_path
                         ));
                     }
                     out.push(ValidatedArg::String(flag_name.to_string()));
@@ -185,11 +197,23 @@ pub fn push_positional(
 
     if is_path {
         let config = params.config.as_ref().unwrap();
-        let secure_path = check_path(&arg, params.context, params.blocked_paths)?;
+        let is_sensitive = config.sensitive;
+        let secure_path = check_path(&arg, params.context, params.blocked_paths).map_err(|e| {
+            if is_sensitive {
+                "Access to a sensitive path was denied".to_string()
+            } else {
+                e
+            }
+        })?;
         if !config.matches(&secure_path.path) {
+            let display_path = if is_sensitive {
+                "[REDACTED]"
+            } else {
+                &secure_path.path
+            };
             return Err(format!(
                 "Positional argument canonical path '{}' is not permitted by policy regex",
-                secure_path.path
+                display_path
             ));
         }
         out.push(ValidatedArg::Path(secure_path));

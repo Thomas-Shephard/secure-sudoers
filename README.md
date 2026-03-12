@@ -10,6 +10,7 @@ The tool is intended to replace traditional access to sudo by enforcing the **pr
 - **Process Isolation**: Secure sandboxing with network, PID, and mount namespaces (optional per tool).
 - **Tamper Resistance**: Automatically applies the immutable bit (`chattr +i`) to configuration and binaries.
 - **Auto Sudo Configuration**: Generates a single `sudoers.d` drop-in to manage all delegated tools.
+- **Security Telemetry**: Every command attempt emits a structured JSON security event to `LOG_AUTHPRIV`, providing immutable audit trails.
 
 ## How It Works
 1. **Invocation**: Run a symlink (e.g., `/usr/local/bin/apt`) that points to the `secure-sudoers` binary.
@@ -17,8 +18,6 @@ The tool is intended to replace traditional access to sudo by enforcing the **pr
 3. **Verification**: The system loads the signed JSON policy and verifies it against the trusted public key.
 4. **Validation**: Arguments are matched against the rules in the policy.
 5. **Execution**: If valid, the process executes the command in a secure, isolated environment.
-
----
 
 ## Setup Guide
 
@@ -66,8 +65,6 @@ This command performs the following actions:
 - Writes a secure sudoers drop-in to `/etc/sudoers.d/secure-sudoers`.
 - Protects the binaries, configuration, and symlinks with the immutable bit (`chattr +i`).
 
----
-
 ## Administration Utility
 
 The `secure-sudoers-utils` tool provides several subcommands to manage the system:
@@ -97,6 +94,69 @@ Secure Sudoers can securely fetch and verify policy updates over HTTPS:
 sudo secure-sudoers-utils update https://your-server.com/policy.json /etc/secure-sudoers/secure_sudoers_public_key.pem
 ```
 The utility ensures the policy `serial` is higher than the current version to prevent downgrade attacks.
+
+## Security Telemetry
+
+Every command validation and execution attempt emits a structured JSON security event to the system logger (`LOG_AUTHPRIV`, facility `auth`).
+
+### Event Schema
+
+Each log entry is a JSON object with the following mandatory fields:
+
+```json
+{
+  "event_id":  "SEC-101",
+  "txn_id":    "a3f7c291",
+  "timestamp": "2026-03-10T21:28:35Z",
+  "identity": {
+    "user":      "alice",
+    "uid":       1000,
+    "euid":      0,
+    "sudo_uid":  1000
+  },
+  "context": {
+    "tool":         "apt",
+    "binary_path":  "/usr/bin/apt",
+    "binary_hash":  "e3b0c44298fc1c149afb..."
+  },
+  "policy": {
+    "status":   "allowed",
+    "rule_id":  "apt",
+    "reason":   null
+  },
+  "args": ["install", "vim"]
+}
+```
+
+### Event ID Codes
+
+| Code      | Meaning                                                          |
+|-----------|------------------------------------------------------------------|
+| `SEC-101` | Command approved and forwarded for execution.                    |
+| `SEC-403` | Policy violation — command denied by policy.                     |
+| `SEC-500` | Identity spoofing detected or invocation parse failure.          |
+| `SEC-503` | Supervisor / execution failure after policy approval.            |
+
+### Transaction Correlation
+
+A unique `txn_id` (8-char hex) is generated at the start of each execution. All log entries from a single invocation share the same `txn_id`.
+
+```bash
+# Correlate all events for a single denied invocation:
+journalctl -t secure-sudoers | grep '"txn_id":"a3f7c291"'
+```
+
+### Identity Integrity
+
+The `identity` block always captures the **real** `uid` and `euid` via `getuid()`/`geteuid()` syscalls, making it immune to `SUDO_USER` spoofing attempts.
+
+### Binary Hash Verification
+
+Before execution, the SHA-256 hash of the resolved binary is computed directly from the secure file descriptor obtained during path resolution.
+
+### Log Format
+
+When `log_destination` is `syslog` (default), events are written as **raw JSON** to `LOG_AUTHPRIV`. When `log_destination` is `stdout`, events are printed in human-readable tracing format (or JSON if `log_format: "json"` is set).
 
 ## Building from Source
 

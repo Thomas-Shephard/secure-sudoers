@@ -83,37 +83,88 @@ impl ValidatedCommand {
     }
 }
 
+#[derive(Debug)]
+pub struct ValidationResult {
+    pub command: ValidatedCommand,
+    pub rule_id: String,
+}
+
+#[derive(Debug)]
+pub struct ValidationDenial {
+    pub reason: String,
+    pub reason_slug: String,
+    pub rule_id: Option<String>,
+}
+
+impl std::fmt::Display for ValidationDenial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.reason)
+    }
+}
+
+impl ValidationDenial {
+    fn new(reason: impl Into<String>, slug: &str) -> Self {
+        Self {
+            reason: reason.into(),
+            reason_slug: slug.to_string(),
+            rule_id: None,
+        }
+    }
+
+    fn with_rule(mut self, rule_id: impl Into<String>) -> Self {
+        self.rule_id = Some(rule_id.into());
+        self
+    }
+}
+
 pub fn validate_command(
     policy: &SecureSudoersPolicy,
     tool_name: &str,
     raw_args: Vec<String>,
-) -> Result<ValidatedCommand, String> {
-    let tool = policy
-        .tools
-        .get(tool_name)
-        .ok_or_else(|| format!("Tool '{}' is not permitted by policy", tool_name))?;
+) -> Result<ValidationResult, ValidationDenial> {
+    let tool = policy.tools.get(tool_name).ok_or_else(|| {
+        ValidationDenial::new(
+            format!("Tool '{}' is not permitted by policy", tool_name),
+            crate::telemetry::denial_reason::MISSING_TOOL,
+        )
+    })?;
+
+    let rule_id = tool.id.clone().unwrap_or_else(|| tool_name.to_string());
 
     let binary_path = crate::fs::check_path(
         &tool.real_binary,
         &ValidationContext::Positional,
         &policy.global_settings.blocked_paths,
-    )?;
+    )
+    .map_err(|e| {
+        ValidationDenial::new(e, crate::telemetry::denial_reason::BLOCKED_PATH).with_rule(&rule_id)
+    })?;
 
-    let safe_re = Regex::new(&policy.global_settings.safe_arg_regex)
-        .map_err(|_| "Policy contains invalid safe_arg_regex".to_string())?;
+    let safe_re = Regex::new(&policy.global_settings.safe_arg_regex).map_err(|_| {
+        ValidationDenial::new(
+            "Policy contains invalid safe_arg_regex",
+            crate::telemetry::denial_reason::POLICY_ERROR,
+        )
+        .with_rule(&rule_id)
+    })?;
 
     let mut out: Vec<ValidatedArg> = Vec::new();
     let mut iter = raw_args.into_iter().peekable();
 
     if !tool.verbs.is_empty() {
-        let verb = iter
-            .next()
-            .ok_or_else(|| format!("Tool '{}' requires a verb", tool_name))?;
+        let verb = iter.next().ok_or_else(|| {
+            ValidationDenial::new(
+                format!("Tool '{}' requires a verb", tool_name),
+                crate::telemetry::denial_reason::MISSING_VERB,
+            )
+            .with_rule(&rule_id)
+        })?;
         if !tool.verbs.contains(&verb) {
-            return Err(format!(
-                "Verb '{}' is not permitted for tool '{}'",
-                verb, tool_name
-            ));
+            return Err(ValidationDenial::new(
+                format!("Verb '{}' is not permitted for tool '{}'", verb, tool_name),
+                crate::telemetry::denial_reason::UNKNOWN_VERB,
+            )
+            .with_rule(&rule_id));
         }
         out.push(ValidatedArg::String(verb));
     }
@@ -135,13 +186,22 @@ pub fn validate_command(
                 blocked_paths: &policy.global_settings.blocked_paths,
             };
             for rem in iter {
-                helpers::push_positional(rem, &p_params, &mut out)?;
+                helpers::push_positional(rem, &p_params, &mut out).map_err(|e| {
+                    ValidationDenial::new(e, crate::telemetry::denial_reason::BLOCKED_ARGUMENT)
+                        .with_rule(&rule_id)
+                })?;
             }
             break;
         } else if arg.starts_with("--") {
-            helpers::process_long_flag(arg, &v_params, &mut iter, &mut out)?;
+            helpers::process_long_flag(arg, &v_params, &mut iter, &mut out).map_err(|e| {
+                ValidationDenial::new(e, crate::telemetry::denial_reason::UNKNOWN_FLAG)
+                    .with_rule(&rule_id)
+            })?;
         } else if arg.starts_with('-') && arg.len() > 1 {
-            helpers::process_short_flag(arg, &v_params, &mut iter, &mut out)?;
+            helpers::process_short_flag(arg, &v_params, &mut iter, &mut out).map_err(|e| {
+                ValidationDenial::new(e, crate::telemetry::denial_reason::UNKNOWN_FLAG)
+                    .with_rule(&rule_id)
+            })?;
         } else {
             let p_params = helpers::PositionalParams {
                 tool_name,
@@ -151,7 +211,10 @@ pub fn validate_command(
                 config: &tool.positional,
                 blocked_paths: &policy.global_settings.blocked_paths,
             };
-            helpers::push_positional(arg, &p_params, &mut out)?;
+            helpers::push_positional(arg, &p_params, &mut out).map_err(|e| {
+                ValidationDenial::new(e, crate::telemetry::denial_reason::BLOCKED_ARGUMENT)
+                    .with_rule(&rule_id)
+            })?;
         }
     }
 
@@ -177,11 +240,14 @@ pub fn validate_command(
         merged
     };
 
-    Ok(ValidatedCommand {
-        binary: binary_path,
-        args: out,
-        isolation,
-        env_whitelist,
+    Ok(ValidationResult {
+        command: ValidatedCommand {
+            binary: binary_path,
+            args: out,
+            isolation,
+            env_whitelist,
+        },
+        rule_id,
     })
 }
 
@@ -198,16 +264,45 @@ mod tests {
 
     #[test]
     fn test_valid_verb_accepted() {
-        let cmd = validate_command(&make_policy(), "apt", args(&["install"])).unwrap();
+        let res = validate_command(&make_policy(), "apt", args(&["install"])).unwrap();
         assert!(
-            cmd.binary().path.ends_with("/usr/bin/apt") || cmd.binary().path.ends_with("/bin/apt")
+            res.command.binary().path.ends_with("/usr/bin/apt")
+                || res.command.binary().path.ends_with("/bin/apt")
         );
     }
 
     #[test]
+    fn test_rule_id_defaults_to_tool_name() {
+        let res = validate_command(&make_policy(), "apt", args(&["install"])).unwrap();
+        assert_eq!(res.rule_id, "apt");
+    }
+
+    #[test]
+    fn test_rule_id_uses_policy_id_field() {
+        let mut p = make_policy();
+        if let Some(tool) = p.tools.get_mut("apt") {
+            tool.id = Some("apt-policy-v1".to_string());
+        }
+        let res = validate_command(&p, "apt", args(&["install"])).unwrap();
+        assert_eq!(res.rule_id, "apt-policy-v1");
+    }
+
+    #[test]
+    fn test_denial_carries_rule_id() {
+        let p = make_policy();
+        let err = validate_command(&p, "apt", args(&[])).unwrap_err();
+        assert_eq!(err.rule_id.as_deref(), Some("apt"));
+    }
+
+    #[test]
     fn test_clustered_flags_deconstructed() {
-        let cmd = validate_command(&make_policy(), "apt", args(&["install", "-ya"])).unwrap();
-        let arg_strs: Vec<String> = cmd.args().iter().map(|a| a.as_str().to_string()).collect();
+        let res = validate_command(&make_policy(), "apt", args(&["install", "-ya"])).unwrap();
+        let arg_strs: Vec<String> = res
+            .command
+            .args()
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
         assert!(arg_strs.contains(&"-y".to_string()));
         assert!(arg_strs.contains(&"-a".to_string()));
     }
@@ -230,12 +325,22 @@ mod tests {
 
         p.tools.insert("test".to_string(), tool);
 
-        let cmd1 = validate_command(&p, "test", args(&["-pVALUE"])).unwrap();
-        let arg_strs: Vec<String> = cmd1.args().iter().map(|a| a.as_str().to_string()).collect();
+        let res1 = validate_command(&p, "test", args(&["-pVALUE"])).unwrap();
+        let arg_strs: Vec<String> = res1
+            .command
+            .args()
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
         assert_eq!(arg_strs, args(&["-p", "VALUE"]));
 
-        let cmd2 = validate_command(&p, "test", args(&["-vpVALUE"])).unwrap();
-        let arg_strs2: Vec<String> = cmd2.args().iter().map(|a| a.as_str().to_string()).collect();
+        let res2 = validate_command(&p, "test", args(&["-vpVALUE"])).unwrap();
+        let arg_strs2: Vec<String> = res2
+            .command
+            .args()
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
         assert_eq!(arg_strs2, args(&["-v", "-p", "VALUE"]));
 
         assert!(validate_command(&p, "test", args(&["-P/etc/shadow"])).is_err());
@@ -253,12 +358,22 @@ mod tests {
 
         p.tools.insert("deploy".to_string(), tool);
 
-        let cmd1 = validate_command(&p, "deploy", args(&["--target=PROD"])).unwrap();
-        let arg_strs: Vec<String> = cmd1.args().iter().map(|a| a.as_str().to_string()).collect();
+        let res1 = validate_command(&p, "deploy", args(&["--target=PROD"])).unwrap();
+        let arg_strs: Vec<String> = res1
+            .command
+            .args()
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
         assert_eq!(arg_strs, args(&["--target", "PROD"]));
 
-        let cmd2 = validate_command(&p, "deploy", args(&["-p=HELLO"])).unwrap();
-        let arg_strs2: Vec<String> = cmd2.args().iter().map(|a| a.as_str().to_string()).collect();
+        let res2 = validate_command(&p, "deploy", args(&["-p=HELLO"])).unwrap();
+        let arg_strs2: Vec<String> = res2
+            .command
+            .args()
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
         assert_eq!(arg_strs2, args(&["-p", "HELLO"]));
     }
 
@@ -321,11 +436,11 @@ mod tests {
         let err = validate_command(&p, "login", args(&["--secret", "my_super_secret_value"]))
             .unwrap_err();
         assert!(
-            err.contains("[REDACTED]"),
+            err.reason.contains("[REDACTED]"),
             "Error message should redact the sensitive flag value"
         );
         assert!(
-            !err.contains("my_super_secret_value"),
+            !err.reason.contains("my_super_secret_value"),
             "Error message should not leak the plain text secret"
         );
     }
@@ -345,16 +460,13 @@ mod tests {
         let ls_bin = std::fs::canonicalize("/bin/ls").unwrap_or_else(|_| "/usr/bin/ls".into());
         let mut tool = make_tool(ls_bin.to_str().unwrap());
         let tmp = std::env::temp_dir();
-        // Construct a path that will be under /tmp or /private/tmp
         let path_buf = tmp.join("secure_sudoers_test_foo");
         let path = path_buf.to_str().unwrap();
         std::fs::write(path, "test").unwrap();
 
-        // Get the path as it will be returned by check_path
         let dummy_context = ValidationContext::Positional;
         let secure_path = crate::fs::check_path(path, &dummy_context, &[]).unwrap();
 
-        // Use that exact path in the regex
         let regex = format!("^{}$", regex::escape(&secure_path.path));
         tool.positional = Some(ParameterConfig::path().regex(regex));
         p.tools.insert("ls".to_string(), tool);
@@ -378,13 +490,11 @@ mod tests {
 
         std::fs::write(&real_file, "test").unwrap();
         std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
-        // Create a regular file for the tool binary
         std::fs::write(&dummy_bin, "bin").unwrap();
 
         let dummy_bin_str = dummy_bin.to_str().unwrap();
         let mut tool = make_tool(dummy_bin_str);
 
-        // Get the canonical path of the real file
         let secure_real = crate::fs::check_path(
             real_file.to_str().unwrap(),
             &ValidationContext::Positional,
@@ -392,7 +502,6 @@ mod tests {
         )
         .unwrap();
 
-        // Regex should match the canonical path
         let regex = format!("^{}$", regex::escape(&secure_real.path));
         tool.positional = Some(ParameterConfig::path().regex(regex));
         p.tools.insert("cat".to_string(), tool);
@@ -405,7 +514,6 @@ mod tests {
         );
 
         let mut tool2 = make_tool(dummy_bin_str);
-        // This should fail because the canonical path will not end in 'symlink'
         tool2.positional = Some(ParameterConfig::path().regex(".+symlink$".to_string()));
         p.tools.insert("cat2".to_string(), tool2);
 

@@ -1,9 +1,30 @@
 use nix::unistd::fexecve;
 use secure_sudoers_common::models::SecureSudoersPolicy;
 use secure_sudoers_common::validator::ValidatedCommand;
+use sha2::{Digest, Sha256};
 use std::ffi::CString;
+use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::path::Path;
+
+pub fn hash_binary_fd(fd_raw: std::os::unix::io::RawFd) -> Result<String, String> {
+    let proc_path = format!("/proc/self/fd/{}", fd_raw);
+    let file = std::fs::File::open(&proc_path)
+        .map_err(|e| format!("Cannot open binary for hashing via {}: {}", proc_path, e))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("Read error while hashing binary: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
 
 pub fn execute_securely(
     cmd: &ValidatedCommand,

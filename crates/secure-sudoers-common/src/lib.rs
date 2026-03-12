@@ -3,7 +3,8 @@
 pub mod fs;
 pub mod logging;
 pub mod models;
-#[cfg(feature = "testing")]
+pub mod telemetry;
+#[cfg(any(feature = "testing", test))]
 pub mod testing;
 pub mod util;
 pub mod validator;

@@ -167,6 +167,8 @@ impl Default for IsolationSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicy {
+    #[serde(default)]
+    pub id: Option<String>,
     pub real_binary: String,
     #[serde(default)]
     pub verbs: Vec<String>,

@@ -1,4 +1,4 @@
-#[cfg(feature = "testing")]
+#[cfg(any(feature = "testing", test))]
 pub mod fixtures {
     use crate::models::{
         GlobalSettings, IsolationSettings, ParameterConfig, SecureSudoersPolicy, ToolPolicy,
@@ -22,6 +22,7 @@ pub mod fixtures {
         tools.insert(
             "tail".to_string(),
             ToolPolicy {
+                id: None,
                 real_binary: tail_bin_str,
                 verbs: vec![],
                 parameters: tail_params,
@@ -43,6 +44,7 @@ pub mod fixtures {
         tools.insert(
             "apt".to_string(),
             ToolPolicy {
+                id: None,
                 real_binary: apt_bin_str,
                 verbs: vec!["update".to_string(), "install".to_string()],
                 parameters: apt_params,
@@ -99,6 +101,7 @@ pub mod fixtures {
 
     pub fn make_tool(real_binary: &str) -> ToolPolicy {
         ToolPolicy {
+            id: None,
             real_binary: real_binary.to_string(),
             verbs: vec![],
             parameters: HashMap::new(),

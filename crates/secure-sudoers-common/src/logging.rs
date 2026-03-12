@@ -10,6 +10,12 @@ pub fn init_logging(settings: &GlobalSettings) {
     }
 }
 
+pub fn init_logging_fallback() {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stdout)
+        .try_init();
+}
+
 fn init_stdout(settings: &GlobalSettings) {
     let builder = tracing_subscriber::fmt().with_writer(std::io::stdout);
     let _ = if settings.log_format == "json" {
@@ -61,9 +67,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SyslogLayer {
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut visitor = MessageVisitor::default();
+        let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
-        let msg = visitor.finish();
+        let msg = visitor.finish(*event.metadata().level());
+
         if let Ok(mut w) = self.writer.lock() {
             let _ = match *event.metadata().level() {
                 tracing::Level::ERROR => w.err(&msg),
@@ -76,11 +83,92 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SyslogLayer {
 }
 
 #[derive(Default)]
+struct JsonVisitor {
+    security_event_json: Option<String>,
+    fields: serde_json::Map<String, serde_json::Value>,
+    message: Option<String>,
+}
+
+impl JsonVisitor {
+    fn finish(mut self, level: tracing::Level) -> String {
+        if let Some(json) = self.security_event_json {
+            return json;
+        }
+        if let Some(msg) = self.message.take() {
+            self.fields
+                .insert("message".to_string(), serde_json::Value::String(msg));
+        }
+        self.fields.insert(
+            "level".to_string(),
+            serde_json::Value::String(level.to_string()),
+        );
+        serde_json::to_string(&self.fields)
+            .unwrap_or_else(|e| format!("{{\"error\":\"json serialization failed: {}\"}}", e))
+    }
+
+    fn record_value(&mut self, field: &tracing::field::Field, value: serde_json::Value) {
+        let name = field.name();
+        if name == "security_event_json" {
+            let json_str = match value {
+                serde_json::Value::String(s) => s,
+                other => serde_json::to_string(&other).unwrap_or_else(|_| "{}".to_string()),
+            };
+            self.security_event_json = Some(json_str);
+        } else if name == "message" {
+            if let serde_json::Value::String(s) = value {
+                self.message = Some(s);
+            }
+        } else {
+            self.fields.insert(name.to_string(), value);
+        }
+    }
+}
+
+impl tracing::field::Visit for JsonVisitor {
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        let num =
+            serde_json::Number::from_f64(value).unwrap_or_else(|| serde_json::Number::from(0));
+        self.record_value(field, serde_json::Value::Number(num));
+    }
+
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.record_value(
+            field,
+            serde_json::Value::Number(serde_json::Number::from(value)),
+        );
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.record_value(
+            field,
+            serde_json::Value::Number(serde_json::Number::from(value)),
+        );
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.record_value(field, serde_json::Value::Bool(value));
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.record_value(field, serde_json::Value::String(value.to_string()));
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let s = format!("{:?}", value);
+        let json_val = serde_json::from_str::<serde_json::Value>(&s)
+            .unwrap_or_else(|_| serde_json::Value::String(s));
+        self.record_value(field, json_val);
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
 struct MessageVisitor {
     message: String,
     fields: String,
 }
 
+#[cfg(test)]
 impl MessageVisitor {
     fn finish(self) -> String {
         if self.fields.is_empty() {
@@ -102,6 +190,7 @@ impl MessageVisitor {
     }
 }
 
+#[cfg(test)]
 impl tracing::field::Visit for MessageVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         self.record_value(field, value.to_string());
@@ -133,6 +222,27 @@ mod tests {
         }
         let store = Arc::new(Mutex::new(Vec::new()));
         let sub = tracing_subscriber::registry().with(Capturer(Arc::clone(&store)));
+        (store, sub)
+    }
+
+    fn get_json_capturer() -> (Arc<Mutex<Vec<String>>>, impl tracing::Subscriber) {
+        struct JsonCapturer(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for JsonCapturer {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut v = JsonVisitor::default();
+                event.record(&mut v);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(v.finish(*event.metadata().level()));
+            }
+        }
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::registry().with(JsonCapturer(Arc::clone(&store)));
         (store, sub)
     }
 
@@ -244,5 +354,52 @@ mod tests {
             ..stdout_settings(false)
         };
         init_logging(&settings);
+    }
+
+    #[test]
+    fn test_json_visitor_produces_valid_json() {
+        let (store, sub) = get_json_capturer();
+        tracing::subscriber::with_default(sub, || {
+            tracing::info!(tool = "apt", user = "alice", "approved");
+        });
+        let msgs = Arc::try_unwrap(store).unwrap().into_inner().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&msgs[0]).expect("must be valid JSON");
+        assert_eq!(parsed["tool"], "apt");
+        assert_eq!(parsed["user"], "alice");
+        assert_eq!(parsed["message"], "approved");
+        assert_eq!(parsed["level"], "INFO");
+    }
+
+    #[test]
+    fn test_json_visitor_security_event_json_passthrough() {
+        let event_json = r#"{"event_id":"SEC-403","txn_id":"abc12345"}"#;
+        let (store, sub) = get_json_capturer();
+        tracing::subscriber::with_default(sub, || {
+            tracing::warn!(security_event_json = %event_json, "denied");
+        });
+        let msgs = Arc::try_unwrap(store).unwrap().into_inner().unwrap();
+        assert_eq!(msgs[0], event_json);
+    }
+
+    #[test]
+    fn test_json_visitor_u64_field() {
+        let (store, sub) = get_json_capturer();
+        tracing::subscriber::with_default(sub, || {
+            tracing::info!(uid = 1000u64, "identity");
+        });
+        let msgs = Arc::try_unwrap(store).unwrap().into_inner().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&msgs[0]).unwrap();
+        assert_eq!(parsed["uid"], 1000);
+    }
+
+    #[test]
+    fn test_json_visitor_bool_field() {
+        let (store, sub) = get_json_capturer();
+        tracing::subscriber::with_default(sub, || {
+            tracing::info!(dry_run = true, "check");
+        });
+        let msgs = Arc::try_unwrap(store).unwrap().into_inner().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&msgs[0]).unwrap();
+        assert_eq!(parsed["dry_run"], true);
     }
 }

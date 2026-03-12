@@ -17,6 +17,18 @@ Secure Sudoers relies on a signed JSON policy located at `/etc/secure-sudoers/po
 
 Each tool is an entry in the `tools` map.
 
+### Top-Level Tool Fields
+
+| Field                        | Type          | Description                                                                                                           |
+|------------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------|
+| `real_binary`                | String        | Absolute path to the binary that will be executed. **Required**.                                                      |
+| `id`                         | String        | Optional human-readable rule identifier. Used as `policy.rule_id` in security telemetry. Defaults to the map key.     |
+| `verbs`                      | Array<String> | Ordered list of sub-commands the user must provide as the first argument (e.g., `["install", "update"]`).             |
+| `help_description`           | String        | Human-readable description of the tool. **Required**.                                                                 |
+| `isolation`                  | Object        | Namespace sandboxing settings (see [Isolation](#isolation-sandboxing)).                                               |
+| `env_whitelist`              | Array<String> | Additional environment variables allowed for this tool (merged with `common_env_whitelist`).                          |
+| `disallowed_positional_args` | Array<String> | List of specific strings that are never allowed as positional arguments (e.g., `["-exec", "--interactive"]`).         |
+
 ### Parameters
 The `parameters` map defines allowed flags and their validation rules.
 
@@ -40,10 +52,29 @@ This block should be defined if you need:
 - **Redaction**: Use `sensitive: true` to mask the value in logs.
 
 ### Isolation (Sandboxing)
-- `unshare_network`: Detach the network stack.
-- `unshare_pid`: Isolate the process tree.
+- `unshare_network`: Detach the network stack (Default: `false`).
+- `unshare_pid`: Isolate the process tree (Default: `false`).
+- `unshare_ipc`: Isolate System V IPC and POSIX message queues (Default: `true`).
+- `unshare_uts`: Isolate hostname and NIS domain name (Default: `true`).
 - `private_mounts`: Overlay directories with an empty `tmpfs`.
 - `readonly_mounts`: Bind-mount host directories as read-only.
+
+## Security Telemetry & Rule IDs
+
+Every command validation attempt emits a JSON security event (see [Security Telemetry](README.md#security-telemetry)).
+The `policy.rule_id` field in each event is populated from the tool's `id` field if set, otherwise it defaults to the tool's map key.
+
+Use the `id` field to assign stable, versioned rule identifiers that remain meaningful even if the map key changes:
+
+```
+"apt": {
+  "id": "apt-install-v2",
+  "real_binary": "/usr/bin/apt",
+  ...
+}
+```
+
+This allows audit queries like `grep '"rule_id":"apt-install-v2"'` to work consistently across policy updates.
 
 ## Example Configuration
 
@@ -57,7 +88,9 @@ This block should be defined if you need:
   },
   "tools": {
     "apt": {
+      "id": "apt-policy-v1",
       "real_binary": "/usr/bin/apt",
+      "help_description": "System package manager",
       "verbs": ["install", "update"],
       "parameters": {
         "-y": { "type": "bool" },

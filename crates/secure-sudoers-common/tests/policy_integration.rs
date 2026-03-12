@@ -35,9 +35,14 @@ fn test_policy_parsing_and_validation() {
     let args = vec!["-l".to_string(), "/tmp".to_string()];
     let cmd = validate_command(&policy, "ls", args).unwrap();
 
-    assert_eq!(cmd.binary().path, ls_bin_str);
+    assert_eq!(cmd.command.binary().path, ls_bin_str);
 
-    let arg_strs: Vec<String> = cmd.args().iter().map(|a| a.as_str().to_string()).collect();
+    let arg_strs: Vec<String> = cmd
+        .command
+        .args()
+        .iter()
+        .map(|a| a.as_str().to_string())
+        .collect();
     assert_eq!(arg_strs, vec!["-l", "/tmp"]);
 }
 
