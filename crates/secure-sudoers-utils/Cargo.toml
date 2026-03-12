@@ -21,7 +21,7 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 serde_json = "1.0"
 libc = "0.2"
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false, optional = true }
-tempfile = "3.26"
+tempfile = "3.27"
 
 [dev-dependencies]
 secure-sudoers-common = { path = "../secure-sudoers-common", features = ["testing"] }
