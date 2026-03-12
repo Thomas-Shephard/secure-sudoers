@@ -155,8 +155,8 @@ impl tracing::field::Visit for JsonVisitor {
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         let s = format!("{:?}", value);
-        let json_val = serde_json::from_str::<serde_json::Value>(&s)
-            .unwrap_or_else(|_| serde_json::Value::String(s));
+        let json_val =
+            serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::Value::String(s));
         self.record_value(field, json_val);
     }
 }

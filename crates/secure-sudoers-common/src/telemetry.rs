@@ -73,7 +73,7 @@ pub fn rfc3339_now() -> String {
         libc::strftime(
             buf.as_mut_ptr() as *mut libc::c_char,
             buf.len(),
-            b"%Y-%m-%dT%H:%M:%SZ\0".as_ptr() as *const libc::c_char,
+            c"%Y-%m-%dT%H:%M:%SZ".as_ptr(),
             &tm,
         )
     };
