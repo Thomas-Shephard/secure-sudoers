@@ -5,13 +5,14 @@ unmaintained = "all"
 ignore = []
 
 [licenses]
-unused-allowed-license = "deny"
+unused-allowed-license = "allow"
 confidence-threshold = 0.8
 allow = [
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "Zlib",
+    "Unicode-3.0"
 ]
 
 [bans]
