@@ -10,3 +10,5 @@ resolver = "2"
 edition = "2024"
 authors = ["Thomas Shephard"]
 license = "MIT"
+version = "0.1.0"
+description = "A memory-safe, high-security gatekeeper for sudo."
