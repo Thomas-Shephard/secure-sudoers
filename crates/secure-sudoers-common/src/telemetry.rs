@@ -19,12 +19,22 @@ pub mod denial_reason {
     pub const POLICY_ERROR: &str = "policy_error";
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountType {
+    System,
+    Local,
+    Network,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityInfo {
     pub user: String,
     pub uid: u32,
     pub euid: u32,
     pub sudo_uid: Option<u32>,
+    pub account_type: AccountType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +119,7 @@ mod tests {
                 uid: 1000,
                 euid: 0,
                 sudo_uid: Some(1000),
+                account_type: AccountType::Local,
             },
             context: ContextInfo {
                 tool: "apt".to_string(),
@@ -128,6 +139,7 @@ mod tests {
         assert_eq!(parsed["txn_id"], "abc12345");
         assert_eq!(parsed["identity"]["user"], "alice");
         assert_eq!(parsed["identity"]["uid"], 1000);
+        assert_eq!(parsed["identity"]["account_type"], "local");
         assert_eq!(parsed["context"]["tool"], "apt");
         assert_eq!(parsed["policy"]["status"], "allowed");
     }
@@ -143,6 +155,7 @@ mod tests {
                 uid: 0,
                 euid: 0,
                 sudo_uid: None,
+                account_type: AccountType::Unknown,
             },
             context: ContextInfo {
                 tool: String::new(),

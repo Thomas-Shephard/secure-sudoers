@@ -4,7 +4,7 @@ use secure_sudoers::exec::hash_binary_fd;
 use secure_sudoers::helpers::{load_policy, parse_invocation, redact_args};
 use secure_sudoers::supervisor;
 use secure_sudoers_common::telemetry::{
-    self, ContextInfo, IdentityInfo, PolicyInfo, SecurityEvent,
+    self, AccountType, ContextInfo, IdentityInfo, PolicyInfo, SecurityEvent,
 };
 use secure_sudoers_common::{logging, validator};
 use std::os::fd::AsRawFd;
@@ -191,37 +191,122 @@ fn resolve_identity_triad() -> IdentityInfo {
         .ok()
         .and_then(|s| s.parse::<u32>().ok());
 
-    // Resolve the username. When running as root under sudo, prefer the
-    // original invoking user (SUDO_UID -> passwd lookup -> SUDO_USER).
-    let user: String = if euid == 0 {
-        if let Some(orig_uid) = sudo_uid {
-            User::from_uid(Uid::from_raw(orig_uid))
-                .ok()
-                .flatten()
-                .map(|u| u.name)
-                .or_else(|| env::var("SUDO_USER").ok())
-                .unwrap_or_else(|| format!("uid:{}", uid))
-        } else {
-            env::var("SUDO_USER").unwrap_or_else(|_| {
-                User::from_uid(Uid::from_raw(uid))
-                    .ok()
-                    .flatten()
-                    .map(|u| u.name)
-                    .unwrap_or_else(|| format!("uid:{}", uid))
-            })
+    // Resolve the username from the process real UID.
+    let resolved_user = match User::from_uid(Uid::from_raw(uid)) {
+        Ok(Some(u)) => Some(u.name),
+        Ok(None) => None,
+        Err(e) => {
+            warn!(uid, error = %e, "failed to resolve username from UID");
+            None
         }
-    } else {
-        User::from_uid(Uid::from_raw(uid))
-            .ok()
-            .flatten()
-            .map(|u| u.name)
-            .unwrap_or_else(|| uid.to_string())
     };
+
+    let account_type = resolved_user
+        .as_deref()
+        .map(|username| classify_account_type(username, uid))
+        .unwrap_or(AccountType::Unknown);
+
+    let user = resolved_user.unwrap_or_else(|| format!("uid:{uid}"));
 
     IdentityInfo {
         user,
         uid,
         euid,
         sudo_uid,
+        account_type,
+    }
+}
+
+fn classify_account_type(username: &str, uid: u32) -> AccountType {
+    match classify_account_type_from_etc_passwd(username, uid) {
+        Ok(account_type) => account_type,
+        Err(e) => {
+            warn!(
+                uid,
+                user = %username,
+                error = %e,
+                "failed to inspect /etc/passwd for account classification"
+            );
+            AccountType::Unknown
+        }
+    }
+}
+
+fn classify_account_type_from_etc_passwd(username: &str, uid: u32) -> std::io::Result<AccountType> {
+    use std::fs::OpenOptions;
+    use std::io::BufReader;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let passwd_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open("/etc/passwd")?;
+
+    classify_account_type_from_reader(username, uid, BufReader::new(passwd_file))
+}
+
+fn classify_account_type_from_reader<R: std::io::BufRead>(
+    username: &str,
+    uid: u32,
+    mut reader: R,
+) -> std::io::Result<AccountType> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            return Ok(AccountType::Network);
+        }
+
+        let entry = line.trim_end_matches(['\n', '\r']);
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+
+        if let Some((entry_username, _)) = entry.split_once(':') {
+            if entry_username == username {
+                return Ok(if uid < 1000 {
+                    AccountType::System
+                } else {
+                    AccountType::Local
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    const MOCK_PASSWD: &str = "\
+root:x:0:0:root:/root:/bin/bash
+alice:x:1001:1001:Alice:/home/alice:/bin/bash
+";
+
+    #[test]
+    fn classify_uid_zero_as_system_for_local_account() {
+        let account_type =
+            classify_account_type_from_reader("root", 0, Cursor::new(MOCK_PASSWD)).unwrap();
+        assert_eq!(account_type, AccountType::System);
+    }
+
+    #[test]
+    fn classify_uid_over_threshold_as_local_for_local_account() {
+        let account_type =
+            classify_account_type_from_reader("alice", 1001, Cursor::new(MOCK_PASSWD)).unwrap();
+        assert_eq!(account_type, AccountType::Local);
+    }
+
+    #[test]
+    fn classify_missing_local_account_as_network() {
+        let account_type = classify_account_type_from_reader(
+            "ldap-user",
+            2001,
+            Cursor::new(MOCK_PASSWD),
+        )
+        .unwrap();
+        assert_eq!(account_type, AccountType::Network);
     }
 }

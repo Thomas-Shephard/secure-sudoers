@@ -112,7 +112,8 @@ Each log entry is a JSON object with the following mandatory fields:
     "user":      "alice",
     "uid":       1000,
     "euid":      0,
-    "sudo_uid":  1000
+    "sudo_uid":  1000,
+    "account_type": "local"
   },
   "context": {
     "tool":         "apt",
@@ -149,6 +150,12 @@ journalctl -t secure-sudoers | grep '"txn_id":"a3f7c291"'
 ### Identity Integrity
 
 The `identity` block always captures the **real** `uid` and `euid` via `getuid()`/`geteuid()` syscalls, making it immune to `SUDO_USER` spoofing attempts.
+
+It also includes `account_type`, classified as:
+- `system`: username is present in local `/etc/passwd` and `uid < 1000`
+- `local`: username is present in local `/etc/passwd` and `uid >= 1000`
+- `network`: username resolves via NSS but is not present in local `/etc/passwd` (e.g., LDAP/AD/SSSD)
+- `unknown`: fallback when identity resolution or `/etc/passwd` read/scan fails
 
 ### Binary Hash Verification
 
