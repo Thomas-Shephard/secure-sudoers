@@ -204,18 +204,129 @@ fn write_sudoers_file_to(
     symlink_dir: &str,
 ) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    struct TempFileCleanupGuard {
+        path: std::path::PathBuf,
+        armed: bool,
+    }
+
+    impl TempFileCleanupGuard {
+        fn new(path: std::path::PathBuf) -> Self {
+            Self { path, armed: true }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for TempFileCleanupGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            if let Err(e) = std::fs::remove_file(&self.path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "Warning: failed to clean up temporary sudoers file {}: {e}",
+                        self.path.display()
+                    );
+                }
+            }
+        }
+    }
+
     let content = generate_sudoers_content_with_dir(tools, symlink_dir);
+    let sudoers = std::path::Path::new(sudoers_path);
+    let sudoers_file_name = sudoers.file_name().ok_or_else(|| {
+        format!("Invalid sudoers destination path {sudoers_path}: missing file name")
+    })?;
+    let temp_path = sudoers.with_file_name(format!("{}.tmp", sudoers_file_name.to_string_lossy()));
+    let mut temp_cleanup_guard = TempFileCleanupGuard::new(temp_path.clone());
+
     let mut f = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o440)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(sudoers_path)
-        .map_err(|e| format!("Cannot create {sudoers_path}: {e}"))?;
+        .open(&temp_path)
+        .map_err(|e| {
+            format!(
+                "Cannot create temporary sudoers file {} for destination {}: {e}",
+                temp_path.display(),
+                sudoers_path
+            )
+        })?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o440))
+        .map_err(|e| {
+            format!(
+                "Cannot set permissions on temporary sudoers file {}: {e}",
+                temp_path.display()
+            )
+        })?;
     f.write_all(content.as_bytes())
-        .map_err(|e| format!("Cannot write {sudoers_path}: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "Cannot write temporary sudoers file {} for destination {}: {e}",
+                temp_path.display(),
+                sudoers_path
+            )
+        })?;
+    f.sync_all().map_err(|e| {
+        format!(
+            "Cannot flush temporary sudoers file {} for destination {}: {e}",
+            temp_path.display(),
+            sudoers_path
+        )
+    })?;
+    drop(f);
+
+    let visudo_output = std::process::Command::new("/usr/sbin/visudo")
+        .arg("-c")
+        .arg("-f")
+        .arg(&temp_path)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Cannot execute 'visudo -c -f {}' while validating sudoers destination {}: {e}",
+                temp_path.display(),
+                sudoers_path
+            )
+        })?;
+    if !visudo_output.status.success() {
+        let stderr = String::from_utf8_lossy(&visudo_output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&visudo_output.stdout).trim().to_string();
+        let mut command_output = String::new();
+        if !stderr.is_empty() {
+            command_output.push_str(&format!("stderr: {stderr}"));
+        }
+        if !stdout.is_empty() {
+            if !command_output.is_empty() {
+                command_output.push_str("; ");
+            }
+            command_output.push_str(&format!("stdout: {stdout}"));
+        }
+        if command_output.is_empty() {
+            command_output = "no command output".to_string();
+        }
+
+        return Err(format!(
+            "visudo validation failed for temporary sudoers file {} (target {}): {command_output}",
+            temp_path.display(),
+            sudoers_path
+        ));
+    }
+
+    std::fs::rename(&temp_path, sudoers).map_err(|e| {
+        format!(
+            "Cannot atomically replace sudoers destination {} with temporary file {}: {e}",
+            sudoers_path,
+            temp_path.display()
+        )
+    })?;
+    temp_cleanup_guard.disarm();
+
     println!("  Wrote sudoers drop-in: {sudoers_path}");
     Ok(())
 }
@@ -223,14 +334,15 @@ fn write_sudoers_file_to(
 pub(crate) fn chattr_op(flag: &str, paths: &[&str]) -> Vec<String> {
     let mut errors = Vec::new();
     for path in paths {
-        match std::process::Command::new("chattr")
+        match std::process::Command::new("/usr/bin/chattr")
             .arg(flag)
+            .arg("--")
             .arg(path)
             .status()
         {
             Ok(s) if s.success() => {}
-            Ok(s) => errors.push(format!("chattr {flag} {path}: exited with {s}")),
-            Err(e) => errors.push(format!("chattr {flag} {path}: {e}")),
+            Ok(s) => errors.push(format!("/usr/bin/chattr {flag} -- {path}: exited with {s}")),
+            Err(e) => errors.push(format!("/usr/bin/chattr {flag} -- {path}: {e}")),
         }
     }
     errors
@@ -362,6 +474,31 @@ mod tests {
         assert!(content.contains("/usr/local/bin/apt"));
         assert!(content.contains("/usr/local/bin/docker"));
         assert!(content.contains("Defaults secure_path="));
+    }
+
+    #[test]
+    fn test_write_sudoers_file_to_validation_failure_keeps_destination_and_cleans_temp() {
+        let dir = TempDir::new().unwrap();
+        let sudoers = dir.path().join("sudoers");
+        std::fs::write(&sudoers, "ORIGINAL\n").unwrap();
+
+        let err = write_sudoers_file_to(
+            &["bad\ntool".to_string()],
+            sudoers.to_str().unwrap(),
+            "/usr/local/bin",
+        )
+        .expect_err("invalid sudoers content should fail visudo validation");
+        assert!(
+            err.contains("visudo validation failed"),
+            "unexpected error: {err}"
+        );
+
+        let content_after = std::fs::read_to_string(&sudoers).unwrap();
+        assert_eq!(content_after, "ORIGINAL\n");
+        assert!(
+            !dir.path().join("sudoers.tmp").exists(),
+            "temporary file should be removed after validation failure"
+        );
     }
 
     struct TestEnv {

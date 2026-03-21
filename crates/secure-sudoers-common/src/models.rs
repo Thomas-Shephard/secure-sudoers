@@ -283,13 +283,14 @@ impl std::fmt::Display for ValidationContext {
 }
 
 pub fn is_valid_tool_name(name: &str) -> bool {
-    !(name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\0')
-        || name.contains(',')
-        || name.chars().any(|c| c.is_whitespace()))
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+
+    match regex::Regex::new(r"^[a-zA-Z0-9._+-]+$") {
+        Ok(re) => re.is_match(name),
+        Err(_) => false,
+    }
 }
 
 impl SecureSudoersPolicy {
@@ -411,6 +412,7 @@ mod tests {
         assert!(is_valid_tool_name("my_tool"));
         assert!(is_valid_tool_name("tool123"));
         assert!(is_valid_tool_name("a"));
+        assert!(is_valid_tool_name("g++"));
 
         assert!(!is_valid_tool_name(""), "empty string should be invalid");
         assert!(!is_valid_tool_name("."), ". should be invalid");
@@ -427,6 +429,11 @@ mod tests {
             !is_valid_tool_name("tool\nnewline"),
             "newline should be invalid"
         );
+
+        assert!(!is_valid_tool_name("tool*"));
+        assert!(!is_valid_tool_name("tool?"));
+        assert!(!is_valid_tool_name("tool["));
+        assert!(!is_valid_tool_name("tool]"));
     }
 
     #[test]
