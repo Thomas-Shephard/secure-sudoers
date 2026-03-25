@@ -10,6 +10,12 @@ echo "  Running as: $(id)"
 echo "  Kernel: $(uname -r)"
 echo "============================================================"
 
+echo "Building binaries for full-path E2E tests..."
+cargo build --workspace --all-features --bins
+
+echo "Running Bats full user journey tests..."
+bats -t /workspace/tests/e2e_full_user_path.bats
+
 cargo llvm-cov --workspace --all-features --no-report -- --test-threads=1
 cargo llvm-cov report --cobertura --output-path cobertura.xml
 cargo llvm-cov report --summary-only

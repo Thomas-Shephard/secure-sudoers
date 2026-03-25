@@ -299,28 +299,30 @@ fn write_sudoers_file_to(
             Err(e) => visudo_exec_errors.push(format!("{visudo_path}: {e}")),
         }
     }
-    match visudo_output {
-        Some(output) => {
-            if !output.status.success() {
-                return Err(visudo_validation_failed_message(
-                    &temp_path,
-                    sudoers_path,
-                    &output,
-                ));
-            }
-        }
-        None if visudo_exec_errors.is_empty() => {
-            validate_sudoers_without_visudo(tools, &temp_path, sudoers_path)?
-        }
-        None => {
-            return Err(format!(
+    let visudo_output = visudo_output.ok_or_else(|| {
+        if visudo_exec_errors.is_empty() {
+            format!(
+                "Cannot execute visudo from known paths (/usr/sbin/visudo, /usr/bin/visudo) \
+while validating sudoers destination {} for temporary file {}: command not found",
+                sudoers_path,
+                temp_path.display()
+            )
+        } else {
+            format!(
                 "Cannot execute visudo from known paths (/usr/sbin/visudo, /usr/bin/visudo) \
 while validating sudoers destination {} for temporary file {}: {}",
                 sudoers_path,
                 temp_path.display(),
                 visudo_exec_errors.join("; ")
-            ));
+            )
         }
+    })?;
+    if !visudo_output.status.success() {
+        return Err(visudo_validation_failed_message(
+            &temp_path,
+            sudoers_path,
+            &visudo_output,
+        ));
     }
 
     std::fs::rename(&temp_path, sudoers).map_err(|e| {
@@ -362,44 +364,6 @@ fn visudo_validation_failed_message(
         temp_path.display(),
         sudoers_path
     )
-}
-
-#[cfg(not(test))]
-fn validate_sudoers_without_visudo(
-    _tools: &[String],
-    temp_path: &std::path::Path,
-    sudoers_path: &str,
-) -> Result<(), String> {
-    Err(format!(
-        "Cannot execute visudo from known paths (/usr/sbin/visudo, /usr/bin/visudo) \
-while validating sudoers destination {} for temporary file {}: command not found",
-        sudoers_path,
-        temp_path.display()
-    ))
-}
-
-#[cfg(test)]
-fn validate_sudoers_without_visudo(
-    tools: &[String],
-    temp_path: &std::path::Path,
-    sudoers_path: &str,
-) -> Result<(), String> {
-    let invalid_tools: Vec<&str> = tools
-        .iter()
-        .map(String::as_str)
-        .filter(|tool| !secure_sudoers_common::models::is_valid_tool_name(tool))
-        .collect();
-    if invalid_tools.is_empty() {
-        return Ok(());
-    }
-
-    Err(format!(
-        "visudo validation failed for temporary sudoers file {} (target {}): \
-stderr: fallback validation failed because visudo is unavailable and tool name(s) are invalid: {}",
-        temp_path.display(),
-        sudoers_path,
-        invalid_tools.join(", ")
-    ))
 }
 
 pub(crate) fn chattr_op(flag: &str, paths: &[&str]) -> Vec<String> {
