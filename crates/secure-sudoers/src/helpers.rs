@@ -151,10 +151,25 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
     if let Some(tool) = policy.tools.get(tool_name) {
         let mut redacted = Vec::with_capacity(args.len());
         let mut skip_next = false;
+        let mut after_double_dash = false;
         for arg in args {
             if skip_next {
                 redacted.push("[REDACTED]".to_string());
                 skip_next = false;
+                continue;
+            }
+
+            if arg == "--" {
+                redacted.push(arg.clone());
+                after_double_dash = true;
+                continue;
+            }
+
+            if after_double_dash
+                && let Some(ref pos_config) = tool.positional
+                && pos_config.sensitive
+            {
+                redacted.push("[REDACTED]".to_string());
                 continue;
             }
 
@@ -326,6 +341,28 @@ mod tests {
         let redacted = redact_args(&args, &policy, "apt");
 
         assert_eq!(redacted, argv(&["[REDACTED]", "[REDACTED]", "-y"]));
+    }
+
+    #[test]
+    fn test_redact_args_sensitive_positional_after_double_dash() {
+        let mut policy = make_policy();
+        if let Some(tool) = policy.tools.get_mut("apt") {
+            tool.positional = Some(ParameterConfig::string().sensitive());
+        }
+        let args = argv(&["install", "-y", "--", "-secret-token", "--api-key", "value"]);
+        let redacted = redact_args(&args, &policy, "apt");
+
+        assert_eq!(
+            redacted,
+            argv(&[
+                "[REDACTED]",
+                "-y",
+                "--",
+                "[REDACTED]",
+                "[REDACTED]",
+                "[REDACTED]"
+            ])
+        );
     }
 
     #[test]
