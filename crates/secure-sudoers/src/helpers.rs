@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use secure_sudoers_common::models::SecureSudoersPolicy;
+use secure_sudoers_common::models::{ParameterConfig, ParameterType, SecureSudoersPolicy};
+use std::collections::HashMap;
 use std::path::Path;
 use tracing::{error, warn};
 
@@ -147,6 +148,36 @@ pub(crate) fn load_policy_with_pubkey(
     Ok(policy)
 }
 
+fn is_known_flag_argument(arg: &str, parameters: &HashMap<String, ParameterConfig>) -> bool {
+    if arg.starts_with("--") {
+        if let Some(idx) = arg.find('=') {
+            return parameters.contains_key(&arg[..idx]);
+        }
+        return parameters.contains_key(arg);
+    }
+
+    if !arg.starts_with('-') || arg == "-" {
+        return false;
+    }
+
+    if parameters.contains_key(arg) {
+        return true;
+    }
+
+    for c in arg[1..].chars() {
+        let short_flag = format!("-{c}");
+        let Some(config) = parameters.get(&short_flag) else {
+            return false;
+        };
+
+        if config.param_type != ParameterType::Bool {
+            return true;
+        }
+    }
+
+    true
+}
+
 pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &str) -> Vec<String> {
     if let Some(tool) = policy.tools.get(tool_name) {
         let mut redacted = Vec::with_capacity(args.len());
@@ -229,9 +260,12 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
                 }
             } else if let Some(ref pos_config) = tool.positional
                 && pos_config.sensitive
-                && !arg.starts_with('-')
             {
-                redacted.push("[REDACTED]".to_string());
+                if arg.starts_with('-') && is_known_flag_argument(arg, &tool.parameters) {
+                    redacted.push(arg.clone());
+                } else {
+                    redacted.push("[REDACTED]".to_string());
+                }
             } else {
                 redacted.push(arg.clone());
             }
@@ -375,6 +409,18 @@ mod tests {
                 "[REDACTED]"
             ])
         );
+    }
+
+    #[test]
+    fn test_redact_args_sensitive_positional_starting_with_hyphen() {
+        let mut policy = make_policy();
+        if let Some(tool) = policy.tools.get_mut("apt") {
+            tool.positional = Some(ParameterConfig::string().sensitive());
+        }
+        let args = argv(&["install", "-secret-token", "-y"]);
+        let redacted = redact_args(&args, &policy, "apt");
+
+        assert_eq!(redacted, argv(&["[REDACTED]", "[REDACTED]", "-y"]));
     }
 
     #[test]
