@@ -18,10 +18,7 @@ allow = [
 [bans]
 multiple-versions = "warn"
 deny = []
-skip = [
-    { crate = "getrandom@0.2.17", reason = "Required via rand_core 0.6 / ed25519-dalek and ring/rustls trees in current dependency set" },
-    { crate = "getrandom@0.4.2", reason = "Required transitively by tempfile in current dependency set" },
-]
+skip = []
 skip-tree = []
 
 [sources]
