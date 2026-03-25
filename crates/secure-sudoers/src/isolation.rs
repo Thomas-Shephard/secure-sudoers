@@ -24,45 +24,63 @@ fn proc_fd_path(fd: i32) -> String {
     format!("/proc/self/fd/{fd}")
 }
 
-fn mount_shadow_fd(fd: i32, original_path: &str) -> Result<(), String> {
+fn fstat_for_fd(fd: i32, context_path: &str) -> Result<libc::stat, String> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
         return Err(format!(
             "fstat failed on '{}': {}",
-            original_path,
+            context_path,
             std::io::Error::last_os_error()
         ));
     }
+    Ok(st)
+}
+
+fn ensure_path_matches_fd(path_str: &str, expected_fd: i32) -> Result<(), String> {
+    let current_fd = safe_traverse(path_str, false)?;
+    let expected = fstat_for_fd(expected_fd, path_str)?;
+    let current = fstat_for_fd(current_fd.as_raw_fd(), path_str)?;
+
+    if expected.st_dev != current.st_dev || expected.st_ino != current.st_ino {
+        return Err(format!(
+            "Security failure: path '{}' changed after verification",
+            path_str
+        ));
+    }
+    Ok(())
+}
+
+fn mount_shadow_fd(fd: i32, original_path: &str) -> Result<(), String> {
+    let st = fstat_for_fd(fd, original_path)?;
+    ensure_path_matches_fd(original_path, fd)?;
     let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
-    let target_path = proc_fd_path(fd);
 
     if is_dir {
         mount(
             Some("tmpfs"),
-            target_path.as_str(),
+            original_path,
             Some("tmpfs"),
             MsFlags::empty(),
             None::<&str>,
         )
         .map_err(|e| {
             format!(
-                "Security failure: tmpfs mount on blocked dir '{}' (fd path '{}') failed: {e}",
-                original_path, target_path
+                "Security failure: tmpfs mount on blocked dir '{}' failed: {e}",
+                original_path
             )
         })?;
     } else {
         mount(
             Some("/dev/null"),
-            target_path.as_str(),
+            original_path,
             None::<&str>,
             MsFlags::MS_BIND,
             None::<&str>,
         )
         .map_err(|e| {
             format!(
-                "Security failure: bind mount /dev/null on blocked file '{}' (fd path '{}') failed: {e}",
-                original_path,
-                target_path
+                "Security failure: bind mount /dev/null on blocked file '{}' failed: {e}",
+                original_path
             )
         })?;
     }
@@ -242,15 +260,15 @@ fn make_root_private() -> Result<(), String> {
 fn apply_private_mounts(paths: &[String]) -> Result<(), String> {
     for path_str in paths {
         let fd = safe_traverse(path_str, false)?;
-        let mount_path = proc_fd_path(fd.as_raw_fd());
+        ensure_path_matches_fd(path_str, fd.as_raw_fd())?;
         mount(
             Some("tmpfs"),
-            mount_path.as_str(),
+            path_str.as_str(),
             Some("tmpfs"),
             MsFlags::empty(),
             None::<&str>,
         )
-        .map_err(|e| format!("tmpfs mount on '{path_str}' failed via '{mount_path}': {e}"))?;
+        .map_err(|e| format!("tmpfs mount on '{path_str}' failed: {e}"))?;
     }
     Ok(())
 }
@@ -258,24 +276,25 @@ fn apply_private_mounts(paths: &[String]) -> Result<(), String> {
 fn apply_readonly_mounts(paths: &[String]) -> Result<(), String> {
     for path_str in paths {
         let fd = safe_traverse(path_str, false)?;
-        let mount_path = proc_fd_path(fd.as_raw_fd());
+        ensure_path_matches_fd(path_str, fd.as_raw_fd())?;
+        let mount_source = proc_fd_path(fd.as_raw_fd());
         mount(
-            Some(mount_path.as_str()),
-            mount_path.as_str(),
+            Some(mount_source.as_str()),
+            path_str.as_str(),
             None::<&str>,
             MsFlags::MS_BIND,
             None::<&str>,
         )
-        .map_err(|e| format!("bind mount on '{path_str}' failed via '{mount_path}': {e}"))?;
+        .map_err(|e| format!("bind mount on '{path_str}' failed via '{mount_source}': {e}"))?;
 
         mount(
-            Some(mount_path.as_str()),
-            mount_path.as_str(),
+            Some(path_str.as_str()),
+            path_str.as_str(),
             None::<&str>,
             MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
             None::<&str>,
         )
-        .map_err(|e| format!("remount '{path_str}' read-only failed via '{mount_path}': {e}"))?;
+        .map_err(|e| format!("remount '{path_str}' read-only failed: {e}"))?;
     }
     Ok(())
 }
@@ -337,7 +356,6 @@ mod tests {
     use crate::testing::in_fork;
     use secure_sudoers_common::models::IsolationSettings;
     use secure_sudoers_common::testing::fixtures::open_path;
-    use std::os::fd::{FromRawFd, OwnedFd};
 
     fn mount_only_settings() -> IsolationSettings {
         IsolationSettings {
@@ -517,38 +535,33 @@ mod tests {
                 return false;
             }
 
-            let c_path = std::ffi::CString::new(target_path.as_str()).unwrap();
-            let fd_raw = unsafe {
-                libc::open(
-                    c_path.as_ptr(),
-                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
+            let fd = match safe_traverse(&target_path, false) {
+                Ok(fd) => fd,
+                Err(e) => {
+                    eprintln!("safe_traverse failed: {e}");
+                    return false;
+                }
             };
-            if fd_raw < 0 {
-                eprintln!("open O_PATH failed: {}", std::io::Error::last_os_error());
-                return false;
-            }
-            let fd = unsafe { OwnedFd::from_raw_fd(fd_raw) };
 
             let _ = std::fs::remove_file(&target_path);
             std::os::unix::fs::symlink("/etc/hostname", &target_path).unwrap();
 
-            let mount_target = proc_fd_path(fd.as_raw_fd());
-            let res = mount(
-                Some("/dev/null"),
-                mount_target.as_str(),
-                None::<&str>,
-                MsFlags::MS_BIND,
-                None::<&str>,
-            );
-
-            if res.is_err() {
-                eprintln!("mount failed: {}", res.err().unwrap());
-                return false;
+            match ensure_path_matches_fd(&target_path, fd.as_raw_fd()) {
+                Err(e)
+                    if e.contains("symlink detected")
+                        || e.contains("changed after verification") =>
+                {
+                    true
+                }
+                Err(e) => {
+                    eprintln!("unexpected error: {e}");
+                    false
+                }
+                Ok(()) => {
+                    eprintln!("path swap went undetected");
+                    false
+                }
             }
-
-            let _hostname_content = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
-            true
         }
 
         let ok = unsafe { in_fork(child_fn) };
