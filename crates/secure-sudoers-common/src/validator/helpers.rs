@@ -47,9 +47,10 @@ pub fn process_short_flag(
             }
             out.push(ValidatedArg::String(s));
         } else {
+            let display_flag = sanitize_unknown_flag_for_error(&s);
             return Err(format!(
-                "Flag '{}' (from '{}') is not permitted for tool '{}'",
-                s, arg, params.tool_name
+                "Flag '{}' is not permitted for tool '{}'",
+                display_flag, params.tool_name
             ));
         }
     }
@@ -63,12 +64,25 @@ fn process_any_flag(
     out: &mut Vec<ValidatedArg>,
 ) -> Result<(), String> {
     if !process_flag_with_value(flag, None, params, iter, out)? {
+        let display_flag = sanitize_unknown_flag_for_error(flag);
         return Err(format!(
             "Flag '{}' is not permitted for tool '{}'",
-            flag, params.tool_name
+            display_flag, params.tool_name
         ));
     }
     Ok(())
+}
+
+fn sanitize_unknown_flag_for_error(flag: &str) -> &str {
+    if let Some((flag_name, _)) = flag.split_once('=') {
+        return flag_name;
+    }
+
+    if flag.starts_with('-') && !flag.starts_with("--") && flag.len() > 2 {
+        return &flag[..2];
+    }
+
+    flag
 }
 
 fn process_flag_with_value(

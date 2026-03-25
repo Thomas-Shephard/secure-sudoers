@@ -446,6 +446,37 @@ mod tests {
     }
 
     #[test]
+    fn test_unknown_long_flag_equals_does_not_echo_secret_value() {
+        let p = make_policy();
+        let err = validate_command(&p, "apt", args(&["install", "--unknown-flag=SUPER_SECRET"]))
+            .unwrap_err();
+
+        assert!(
+            err.reason.contains("--unknown-flag"),
+            "Error message should keep the unknown flag key"
+        );
+        assert!(
+            !err.reason.contains("SUPER_SECRET"),
+            "Error message should not leak attached unknown flag values"
+        );
+    }
+
+    #[test]
+    fn test_unknown_short_flag_source_does_not_echo_secret_payload() {
+        let p = make_policy();
+        let err = validate_command(&p, "apt", args(&["install", "-zSUPER_SECRET"])).unwrap_err();
+
+        assert!(
+            err.reason.contains("Flag '-z'"),
+            "Error message should identify the disallowed short flag"
+        );
+        assert!(
+            !err.reason.contains("SUPER_SECRET"),
+            "Error message should not leak payload attached to unknown short flags"
+        );
+    }
+
+    #[test]
     fn test_root_path_blocking() {
         let mut p = make_policy();
         p.global_settings.blocked_paths = vec!["/".to_string()];
