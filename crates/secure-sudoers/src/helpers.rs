@@ -215,6 +215,18 @@ pub fn redact_args(args: &[String], policy: &SecureSudoersPolicy, tool_name: &st
             {
                 redacted.push(arg.clone());
                 skip_next = true;
+            } else if !after_double_dash && arg.starts_with("--") {
+                if let Some(idx) = arg.find('=') {
+                    let key = &arg[..idx];
+                    if !tool.parameters.contains_key(key) {
+                        redacted.push(format!("{key}=[REDACTED]"));
+                        continue;
+                    }
+                } else if !tool.parameters.contains_key(arg) {
+                    redacted.push(arg.clone());
+                    skip_next = true;
+                    continue;
+                }
             } else if let Some(ref pos_config) = tool.positional
                 && pos_config.sensitive
                 && !arg.starts_with('-')
@@ -362,6 +374,27 @@ mod tests {
                 "[REDACTED]",
                 "[REDACTED]"
             ])
+        );
+    }
+
+    #[test]
+    fn test_redact_args_unknown_long_flag_equals_redacts_value() {
+        let policy = make_policy();
+        let args = argv(&["install", "--api-key=SECRET_VALUE", "curl"]);
+        let redacted = redact_args(&args, &policy, "apt");
+
+        assert_eq!(redacted, argv(&["install", "--api-key=[REDACTED]", "curl"]));
+    }
+
+    #[test]
+    fn test_redact_args_unknown_long_flag_separate_value_redacts_next_arg() {
+        let policy = make_policy();
+        let args = argv(&["install", "--api-key", "-SECRET_VALUE", "curl"]);
+        let redacted = redact_args(&args, &policy, "apt");
+
+        assert_eq!(
+            redacted,
+            argv(&["install", "--api-key", "[REDACTED]", "curl"])
         );
     }
 
