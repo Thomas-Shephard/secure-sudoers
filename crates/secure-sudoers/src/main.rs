@@ -263,14 +263,14 @@ fn classify_account_type_from_reader<R: std::io::BufRead>(
             continue;
         }
 
-        if let Some((entry_username, _)) = entry.split_once(':') {
-            if entry_username == username {
-                return Ok(if uid < 1000 {
-                    AccountType::System
-                } else {
-                    AccountType::Local
-                });
-            }
+        if let Some((entry_username, _)) = entry.split_once(':')
+            && entry_username == username
+        {
+            return Ok(if uid < 1000 {
+                AccountType::System
+            } else {
+                AccountType::Local
+            });
         }
     }
 }

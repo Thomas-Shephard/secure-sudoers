@@ -226,13 +226,13 @@ fn write_sudoers_file_to(
             if !self.armed {
                 return;
             }
-            if let Err(e) = std::fs::remove_file(&self.path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!(
-                        "Warning: failed to clean up temporary sudoers file {}: {e}",
-                        self.path.display()
-                    );
-                }
+            if let Err(e) = std::fs::remove_file(&self.path)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!(
+                    "Warning: failed to clean up temporary sudoers file {}: {e}",
+                    self.path.display()
+                );
             }
         }
     }
@@ -281,18 +281,42 @@ fn write_sudoers_file_to(
     })?;
     drop(f);
 
-    let visudo_output = std::process::Command::new("/usr/sbin/visudo")
-        .arg("-c")
-        .arg("-f")
-        .arg(&temp_path)
-        .output()
-        .map_err(|e| {
+    let visudo_paths = ["/usr/sbin/visudo", "/usr/bin/visudo"];
+    let mut visudo_output = None;
+    let mut visudo_exec_errors = Vec::new();
+    for visudo_path in visudo_paths {
+        match std::process::Command::new(visudo_path)
+            .arg("-c")
+            .arg("-f")
+            .arg(&temp_path)
+            .output()
+        {
+            Ok(output) => {
+                visudo_output = Some(output);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => visudo_exec_errors.push(format!("{visudo_path}: {e}")),
+        }
+    }
+    let visudo_output = visudo_output.ok_or_else(|| {
+        if visudo_exec_errors.is_empty() {
             format!(
-                "Cannot execute 'visudo -c -f {}' while validating sudoers destination {}: {e}",
-                temp_path.display(),
-                sudoers_path
+                "Cannot execute visudo from known paths (/usr/sbin/visudo, /usr/bin/visudo) \
+while validating sudoers destination {} for temporary file {}: command not found",
+                sudoers_path,
+                temp_path.display()
             )
-        })?;
+        } else {
+            format!(
+                "Cannot execute visudo from known paths (/usr/sbin/visudo, /usr/bin/visudo) \
+while validating sudoers destination {} for temporary file {}: {}",
+                sudoers_path,
+                temp_path.display(),
+                visudo_exec_errors.join("; ")
+            )
+        }
+    })?;
     if !visudo_output.status.success() {
         let stderr = String::from_utf8_lossy(&visudo_output.stderr)
             .trim()
