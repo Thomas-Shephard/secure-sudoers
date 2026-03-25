@@ -301,12 +301,8 @@ alice:x:1001:1001:Alice:/home/alice:/bin/bash
 
     #[test]
     fn classify_missing_local_account_as_network() {
-        let account_type = classify_account_type_from_reader(
-            "ldap-user",
-            2001,
-            Cursor::new(MOCK_PASSWD),
-        )
-        .unwrap();
+        let account_type =
+            classify_account_type_from_reader("ldap-user", 2001, Cursor::new(MOCK_PASSWD)).unwrap();
         assert_eq!(account_type, AccountType::Network);
     }
 }

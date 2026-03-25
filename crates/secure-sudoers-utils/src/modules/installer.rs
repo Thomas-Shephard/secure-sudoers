@@ -265,14 +265,13 @@ fn write_sudoers_file_to(
                 temp_path.display()
             )
         })?;
-    f.write_all(content.as_bytes())
-        .map_err(|e| {
-            format!(
-                "Cannot write temporary sudoers file {} for destination {}: {e}",
-                temp_path.display(),
-                sudoers_path
-            )
-        })?;
+    f.write_all(content.as_bytes()).map_err(|e| {
+        format!(
+            "Cannot write temporary sudoers file {} for destination {}: {e}",
+            temp_path.display(),
+            sudoers_path
+        )
+    })?;
     f.sync_all().map_err(|e| {
         format!(
             "Cannot flush temporary sudoers file {} for destination {}: {e}",
@@ -295,8 +294,12 @@ fn write_sudoers_file_to(
             )
         })?;
     if !visudo_output.status.success() {
-        let stderr = String::from_utf8_lossy(&visudo_output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&visudo_output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&visudo_output.stderr)
+            .trim()
+            .to_string();
+        let stdout = String::from_utf8_lossy(&visudo_output.stdout)
+            .trim()
+            .to_string();
         let mut command_output = String::new();
         if !stderr.is_empty() {
             command_output.push_str(&format!("stderr: {stderr}"));
