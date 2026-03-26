@@ -8,12 +8,6 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 4. Path check vs mount still has race surface
-1. **Location:** `crates/secure-sudoers/src/isolation.rs` (`ensure_path_matches_fd`, `apply_private_mounts`, `apply_readonly_mounts`, `mount_shadow_fd`)
-2. **Issue:** A check-then-use sequence exists between fd/path verification and later path-based mount syscalls.
-3. **Impact:** Residual TOCTOU exposure on attacker-influenced writable paths.
-4. **Suggested Direction:** Migrate to fd-oriented mount APIs (`open_tree`, `move_mount`, `mount_setattr`) for stronger atomicity.
-
 ### 5. No explicit root-to-unprivileged credential transition for executed command
 1. **Location:** Runtime execution flow across `main.rs` → `supervisor.rs` → `exec.rs`
 2. **Issue:** No `setresuid/setresgid` path for launching allowed commands as a less-privileged identity.

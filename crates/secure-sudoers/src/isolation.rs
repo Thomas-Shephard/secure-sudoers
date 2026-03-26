@@ -256,15 +256,33 @@ fn make_root_private() -> Result<(), String> {
 }
 
 fn apply_private_mounts(paths: &[String]) -> Result<(), String> {
+    apply_private_mounts_with(
+        paths,
+        |_| Ok(()),
+        |source, target, fstype, flags| {
+            mount(source, target, fstype, flags, None::<&str>).map_err(|e| e.to_string())
+        },
+    )
+}
+
+fn apply_private_mounts_with<BeforeMount, MountFn>(
+    paths: &[String],
+    mut before_mount: BeforeMount,
+    mut mount_fn: MountFn,
+) -> Result<(), String>
+where
+    BeforeMount: FnMut(&str) -> Result<(), String>,
+    MountFn: FnMut(Option<&str>, &str, Option<&str>, MsFlags) -> Result<(), String>,
+{
     for path_str in paths {
         let fd = safe_traverse(path_str, false)?;
+        before_mount(path_str)?;
         ensure_path_matches_fd(path_str, fd.as_raw_fd())?;
-        mount(
+        mount_fn(
             Some("tmpfs"),
             path_str.as_str(),
             Some("tmpfs"),
             MsFlags::empty(),
-            None::<&str>,
         )
         .map_err(|e| format!("tmpfs mount on '{path_str}' failed: {e}"))?;
     }
@@ -272,25 +290,42 @@ fn apply_private_mounts(paths: &[String]) -> Result<(), String> {
 }
 
 fn apply_readonly_mounts(paths: &[String]) -> Result<(), String> {
+    apply_readonly_mounts_with(
+        paths,
+        |_| Ok(()),
+        |source, target, fstype, flags| {
+            mount(source, target, fstype, flags, None::<&str>).map_err(|e| e.to_string())
+        },
+    )
+}
+
+fn apply_readonly_mounts_with<BeforeMount, MountFn>(
+    paths: &[String],
+    mut before_mount: BeforeMount,
+    mut mount_fn: MountFn,
+) -> Result<(), String>
+where
+    BeforeMount: FnMut(&str) -> Result<(), String>,
+    MountFn: FnMut(Option<&str>, &str, Option<&str>, MsFlags) -> Result<(), String>,
+{
     for path_str in paths {
         let fd = safe_traverse(path_str, false)?;
+        before_mount(path_str)?;
         ensure_path_matches_fd(path_str, fd.as_raw_fd())?;
         let mount_source = proc_fd_path(fd.as_raw_fd());
-        mount(
+        mount_fn(
             Some(mount_source.as_str()),
             path_str.as_str(),
-            None::<&str>,
+            None,
             MsFlags::MS_BIND,
-            None::<&str>,
         )
         .map_err(|e| format!("bind mount on '{path_str}' failed via '{mount_source}': {e}"))?;
 
-        mount(
+        mount_fn(
             Some(path_str.as_str()),
             path_str.as_str(),
-            None::<&str>,
+            None,
             MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
-            None::<&str>,
         )
         .map_err(|e| format!("remount '{path_str}' read-only failed: {e}"))?;
     }
@@ -683,5 +718,108 @@ mod tests {
         let ok = unsafe { in_fork(child_fn) };
         let _ = std::fs::remove_file(&swapper_path);
         assert!(ok, "Isolation must be safe in a private mount namespace");
+    }
+
+    #[test]
+    fn test_apply_private_mounts_rejects_path_swap_before_mount() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let base_path = dir.path().join("target");
+        let moved_path = dir.path().join("target.moved");
+        let attacker_path = dir.path().join("target.attacker");
+        std::fs::create_dir(&base_path).expect("create base dir");
+        std::fs::create_dir(&attacker_path).expect("create attacker dir");
+
+        let base_path = base_path.to_string_lossy().to_string();
+        let moved_path = moved_path.to_string_lossy().to_string();
+        let attacker_path = attacker_path.to_string_lossy().to_string();
+        let paths = vec![base_path.clone()];
+        let mut calls = 0usize;
+
+        let result = apply_private_mounts_with(
+            &paths,
+            |path| {
+                assert_eq!(path, base_path.as_str());
+                std::fs::rename(&base_path, &moved_path)
+                    .map_err(|e| format!("rename base->moved failed: {e}"))?;
+                std::fs::rename(&attacker_path, &base_path)
+                    .map_err(|e| format!("rename attacker->base failed: {e}"))?;
+                Ok(())
+            },
+            |_source, _target, _fstype, _flags| {
+                calls += 1;
+                Ok(())
+            },
+        );
+
+        let err = result.expect_err("private mount should fail closed after path swap");
+        assert!(
+            err.contains("changed after verification") || err.contains("symlink detected"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(calls, 0, "mount should not be attempted after path swap");
+    }
+
+    #[test]
+    fn test_apply_readonly_mounts_rejects_path_swap_before_mount() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let base_path = dir.path().join("target");
+        let moved_path = dir.path().join("target.moved");
+        let attacker_path = dir.path().join("target.attacker");
+        std::fs::create_dir(&base_path).expect("create base dir");
+        std::fs::create_dir(&attacker_path).expect("create attacker dir");
+
+        let base_path = base_path.to_string_lossy().to_string();
+        let moved_path = moved_path.to_string_lossy().to_string();
+        let attacker_path = attacker_path.to_string_lossy().to_string();
+        let paths = vec![base_path.clone()];
+        let mut calls = 0usize;
+
+        let result = apply_readonly_mounts_with(
+            &paths,
+            |path| {
+                assert_eq!(path, base_path.as_str());
+                std::fs::rename(&base_path, &moved_path)
+                    .map_err(|e| format!("rename base->moved failed: {e}"))?;
+                std::fs::rename(&attacker_path, &base_path)
+                    .map_err(|e| format!("rename attacker->base failed: {e}"))?;
+                Ok(())
+            },
+            |_source, _target, _fstype, _flags| {
+                calls += 1;
+                Ok(())
+            },
+        );
+
+        let err = result.expect_err("readonly mount should fail closed after path swap");
+        assert!(
+            err.contains("changed after verification") || err.contains("symlink detected"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(calls, 0, "mount should not be attempted after path swap");
+    }
+
+    #[test]
+    fn test_mount_shadow_fd_rejects_path_swap_before_mount() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let base_path = dir.path().join("target");
+        let moved_path = dir.path().join("target.moved");
+        let attacker_path = dir.path().join("target.attacker");
+        std::fs::write(&base_path, b"ORIGINAL").expect("write base path");
+        std::fs::write(&attacker_path, b"ATTACKER").expect("write attacker path");
+
+        let base_path = base_path.to_string_lossy().to_string();
+        let moved_path = moved_path.to_string_lossy().to_string();
+        let attacker_path = attacker_path.to_string_lossy().to_string();
+
+        let fd = safe_traverse(&base_path, false).expect("safe_traverse");
+        std::fs::rename(&base_path, &moved_path).expect("rename base->moved");
+        std::fs::rename(&attacker_path, &base_path).expect("rename attacker->base");
+
+        let err = mount_shadow_fd(fd.as_raw_fd(), &base_path)
+            .expect_err("mount_shadow_fd should fail closed after path swap");
+        assert!(
+            err.contains("changed after verification") || err.contains("symlink detected"),
+            "unexpected error: {err}"
+        );
     }
 }
