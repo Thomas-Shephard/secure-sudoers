@@ -14,9 +14,7 @@ pub fn setup_isolation(
     make_root_private()?;
     apply_private_mounts(&settings.private_mounts)?;
     apply_blocked_paths(blocked_paths)?;
-
     apply_readonly_mounts(&settings.readonly_mounts)?;
-    drop_capabilities()?;
     Ok(())
 }
 
@@ -300,9 +298,15 @@ fn apply_readonly_mounts(paths: &[String]) -> Result<(), String> {
 }
 
 pub fn drop_capabilities() -> Result<(), String> {
-    for cap in 0..64 {
-        let _ = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
-    }
+    let last_cap = read_cap_last_cap()?;
+    drop_bounding_capabilities_with(last_cap, |cap| {
+        let ret = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    })?;
 
     #[repr(C)]
     struct CapHeader {
@@ -347,6 +351,38 @@ pub fn drop_capabilities() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn drop_bounding_capabilities_with<F>(last_cap: u32, mut drop_one: F) -> Result<(), String>
+where
+    F: FnMut(u32) -> Result<(), std::io::Error>,
+{
+    for cap in 0..=last_cap {
+        if let Err(err) = drop_one(cap) {
+            tracing::error!(
+                capability = cap,
+                error = %err,
+                "Capability bounding-set drop failed"
+            );
+            return Err(format!(
+                "Security failure: PR_CAPBSET_DROP failed for capability {cap}: {err}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_cap_last_cap() -> Result<u32, String> {
+    let cap_last_cap = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+        .map_err(|e| format!("Security failure: cannot read /proc/sys/kernel/cap_last_cap: {e}"))?;
+    parse_cap_last_cap(&cap_last_cap)
+}
+
+fn parse_cap_last_cap(value: &str) -> Result<u32, String> {
+    let trimmed = value.trim();
+    trimmed.parse::<u32>().map_err(|e| {
+        format!("Security failure: invalid /proc/sys/kernel/cap_last_cap value '{trimmed}': {e}")
+    })
 }
 
 #[cfg(test)]
@@ -443,6 +479,35 @@ mod tests {
     }
 
     #[test]
+    fn test_setup_isolation_does_not_pre_drop_capabilities() {
+        require_root!();
+
+        fn child_fn() -> bool {
+            let settings = mount_only_settings();
+            let binary = open_path("/usr/bin/true");
+            match setup_isolation(&settings, &[], &binary, &[]) {
+                Err(e) => {
+                    eprintln!("  setup_isolation failed: {e}");
+                    false
+                }
+                Ok(()) => match drop_capabilities() {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("  explicit drop_capabilities failed after setup_isolation: {e}");
+                        false
+                    }
+                },
+            }
+        }
+
+        let ok = unsafe { in_fork(child_fn) };
+        assert!(
+            ok,
+            "setup_isolation should not pre-drop capabilities before explicit drop"
+        );
+    }
+
+    #[test]
     fn test_drop_capabilities_clears_all_sets() {
         require_root!();
 
@@ -477,6 +542,57 @@ mod tests {
             ok,
             "drop_capabilities should zero all effective and permitted sets"
         );
+    }
+
+    #[test]
+    fn test_drop_capabilities_fails_closed_on_bounding_drop_error() {
+        require_root!();
+
+        fn child_fn() -> bool {
+            if let Err(e) = drop_capabilities() {
+                eprintln!("  initial drop_capabilities failed unexpectedly: {e}");
+                return false;
+            }
+
+            match drop_capabilities() {
+                Ok(()) => {
+                    eprintln!("  expected second drop_capabilities to fail");
+                    false
+                }
+                Err(e) => e.contains("Security failure: PR_CAPBSET_DROP failed for capability 0"),
+            }
+        }
+
+        let ok = unsafe { in_fork(child_fn) };
+        assert!(
+            ok,
+            "drop_capabilities should fail when PR_CAPBSET_DROP is denied"
+        );
+    }
+
+    #[test]
+    fn test_drop_bounding_capabilities_reports_failing_index() {
+        let err = drop_bounding_capabilities_with(5, |cap| {
+            if cap == 3 {
+                Err(std::io::Error::from_raw_os_error(libc::EPERM))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("drop_bounding_capabilities_with should fail on injected EPERM");
+        assert!(err.contains("PR_CAPBSET_DROP failed for capability 3"));
+    }
+
+    #[test]
+    fn test_parse_cap_last_cap_accepts_trimmed_numeric_values() {
+        assert_eq!(parse_cap_last_cap("40\n").unwrap(), 40);
+    }
+
+    #[test]
+    fn test_parse_cap_last_cap_rejects_invalid_values() {
+        let err = parse_cap_last_cap("not-a-number")
+            .expect_err("parse_cap_last_cap should reject non-numeric input");
+        assert!(err.contains("invalid /proc/sys/kernel/cap_last_cap value"));
     }
 
     #[test]

@@ -8,12 +8,6 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 3. Capability bounding drop errors are ignored
-1. **Location:** `crates/secure-sudoers/src/isolation.rs::drop_capabilities` (loop using `PR_CAPBSET_DROP`)
-2. **Issue:** Return values from `prctl(PR_CAPBSET_DROP, ...)` are discarded.
-3. **Impact:** Partial capability-drop failures may silently weaken isolation assumptions.
-4. **Suggested Direction:** Check each call result, fail closed on failures, and log failing capability index.
-
 ### 4. Path check vs mount still has race surface
 1. **Location:** `crates/secure-sudoers/src/isolation.rs` (`ensure_path_matches_fd`, `apply_private_mounts`, `apply_readonly_mounts`, `mount_shadow_fd`)
 2. **Issue:** A check-then-use sequence exists between fd/path verification and later path-based mount syscalls.
