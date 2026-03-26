@@ -78,8 +78,16 @@ fn sanitize_unknown_flag_for_error(flag: &str) -> &str {
         return flag_name;
     }
 
-    if flag.starts_with('-') && !flag.starts_with("--") && flag.len() > 2 {
-        return &flag[..2];
+    if flag.starts_with('-')
+        && !flag.starts_with("--")
+        && flag.chars().count() > 2
+        && let Some(second_char_end) = flag
+            .char_indices()
+            .nth(2)
+            .map(|(idx, _)| idx)
+            .or(Some(flag.len()))
+    {
+        return &flag[..second_char_end];
     }
 
     flag

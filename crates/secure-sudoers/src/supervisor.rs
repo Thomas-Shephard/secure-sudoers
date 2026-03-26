@@ -45,7 +45,8 @@ pub fn run_supervisor(cmd: &ValidatedCommand, policy: &SecureSudoersPolicy) -> R
 fn supervise_direct_child(child: nix::unistd::Pid, stdin_is_tty: bool) -> Result<i32, String> {
     loop {
         if SIGWINCH_RECEIVED.swap(false, Ordering::SeqCst) && stdin_is_tty {
-            let _ = forward_winsize(child);
+            let child_tty = open_child_stdin_tty(child);
+            let _ = forward_winsize_with_child_tty(child, child_tty.as_ref());
         }
 
         match nix::sys::wait::waitpid(child, None) {
@@ -279,11 +280,66 @@ fn install_sigwinch_handler() -> Result<(), String> {
     Ok(())
 }
 
-fn forward_winsize(child: nix::unistd::Pid) -> Result<(), String> {
+struct ChildTtyForwarding {
+    fd: std::fs::File,
+    needs_winsize_sync: bool,
+}
+
+fn stat_identity(fd: libc::c_int) -> Option<(libc::dev_t, libc::ino_t)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return None;
+    }
+    Some((st.st_dev, st.st_ino))
+}
+
+fn open_child_stdin_tty(child: nix::unistd::Pid) -> Option<ChildTtyForwarding> {
+    use std::os::fd::AsRawFd;
+
+    let fd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(format!("/proc/{}/fd/0", child.as_raw()))
+        .ok()?;
+
+    let parent_id = stat_identity(libc::STDIN_FILENO);
+    let child_id = stat_identity(fd.as_raw_fd());
+    let needs_winsize_sync = match (parent_id, child_id) {
+        (Some(p), Some(c)) => p != c,
+        _ => true,
+    };
+
+    Some(ChildTtyForwarding {
+        fd,
+        needs_winsize_sync,
+    })
+}
+
+fn forward_winsize_with_child_tty(
+    child: nix::unistd::Pid,
+    child_tty: Option<&ChildTtyForwarding>,
+) -> Result<(), String> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     if unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) } != 0 {
         return Ok(());
     }
+
+    if let Some(child_tty) = child_tty
+        && child_tty.needs_winsize_sync
+    {
+        use std::os::fd::AsRawFd;
+        let mut child_ws: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(child_tty.fd.as_raw_fd(), libc::TIOCGWINSZ, &mut child_ws) } == 0
+            && (child_ws.ws_row != ws.ws_row
+                || child_ws.ws_col != ws.ws_col
+                || child_ws.ws_xpixel != ws.ws_xpixel
+                || child_ws.ws_ypixel != ws.ws_ypixel)
+        {
+            let _ = unsafe { libc::ioctl(child_tty.fd.as_raw_fd(), libc::TIOCSWINSZ, &ws) };
+            return Ok(());
+        }
+    }
+
     send_signal_to_process_group(child.as_raw(), libc::SIGWINCH)
 }
 
@@ -303,10 +359,14 @@ mod tests {
     use secure_sudoers_common::models::IsolationSettings;
     use secure_sudoers_common::testing::fixtures::{make_policy, open_path};
     use secure_sudoers_common::validator::ValidatedCommand;
+    use std::sync::Mutex;
+
+    static SUPERVISOR_TEST_LOCK: Mutex<()> = Mutex::new(());
     extern "C" fn noop_sigwinch_handler(_: libc::c_int) {}
 
     #[test]
     fn test_sigwinch_handler_sets_flag() {
+        let _guard = SUPERVISOR_TEST_LOCK.lock().expect("lock poisoned");
         use std::sync::atomic::Ordering;
         SIGWINCH_RECEIVED.store(false, Ordering::SeqCst);
         sigwinch_handler(libc::SIGWINCH);
@@ -316,12 +376,14 @@ mod tests {
 
     #[test]
     fn test_parse_ppid_from_stat_parses_expected_field() {
+        let _guard = SUPERVISOR_TEST_LOCK.lock().expect("lock poisoned");
         let sample = "12345 (my proc) S 678 100 100 0 -1 4194560 10 0 0 0 0 0 0 0 20 0 1 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1";
         assert_eq!(parse_ppid_from_stat(sample), Some(678));
     }
 
     #[test]
     fn test_supervisor_tty_stdin_covers_raw_mode_and_winch() {
+        let _guard = SUPERVISOR_TEST_LOCK.lock().expect("lock poisoned");
         require_root!();
 
         fn child_fn() -> bool {
@@ -382,6 +444,7 @@ mod tests {
 
     #[test]
     fn test_forward_winsize_reaches_child_process_group() {
+        let _guard = SUPERVISOR_TEST_LOCK.lock().expect("lock poisoned");
         fn read_one_byte(fd: libc::c_int) -> Option<u8> {
             let mut b = [0u8; 1];
             loop {
@@ -508,7 +571,8 @@ mod tests {
                         return false;
                     }
 
-                    if forward_winsize(child).is_err() {
+                    let child_tty_fd = open_child_stdin_tty(child);
+                    if forward_winsize_with_child_tty(child, child_tty_fd.as_ref()).is_err() {
                         unsafe { libc::close(read_fd) };
                         unsafe { libc::close(master_raw) };
                         return false;
@@ -537,6 +601,7 @@ mod tests {
 
     #[test]
     fn test_supervisor_terminates_daemonized_descendant() {
+        let _guard = SUPERVISOR_TEST_LOCK.lock().expect("lock poisoned");
         use nix::unistd::{ForkResult, Pid, fork, setpgid};
         set_subreaper().expect("set_subreaper failed");
 
@@ -612,5 +677,222 @@ mod tests {
             }
             Err(e) => panic!("fork failed: {e}"),
         }
+    }
+
+    #[test]
+    fn test_forward_winsize_propagates_terminal_size_to_child_tty() {
+        let _guard = SUPERVISOR_TEST_LOCK.lock().expect("lock poisoned");
+        fn read_one_byte(fd: libc::c_int) -> Option<u8> {
+            let mut b = [0u8; 1];
+            loop {
+                let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, 1) };
+                if n == 1 {
+                    return Some(b[0]);
+                }
+                if n == 0 {
+                    return None;
+                }
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return None;
+            }
+        }
+
+        fn child_fn() -> bool {
+            use nix::unistd::{ForkResult, Pid, fork, setpgid};
+            use std::sync::atomic::Ordering;
+
+            // Isolate this forked test process in its own process group so
+            // group-targeted cleanup cannot accidentally hit the test harness.
+            let _ = setpgid(Pid::from_raw(0), Pid::from_raw(0));
+
+            let mut source_master: libc::c_int = -1;
+            let mut source_slave: libc::c_int = -1;
+            let ret = unsafe {
+                libc::openpty(
+                    &mut source_master,
+                    &mut source_slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if ret != 0 {
+                return false;
+            }
+
+            let mut target_master: libc::c_int = -1;
+            let mut target_slave: libc::c_int = -1;
+            let ret = unsafe {
+                libc::openpty(
+                    &mut target_master,
+                    &mut target_slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if ret != 0 {
+                unsafe {
+                    libc::close(source_master);
+                    libc::close(source_slave);
+                }
+                return false;
+            }
+
+            if unsafe { libc::dup2(source_slave, libc::STDIN_FILENO) } < 0 {
+                unsafe {
+                    libc::close(source_master);
+                    libc::close(source_slave);
+                    libc::close(target_master);
+                    libc::close(target_slave);
+                }
+                return false;
+            }
+            unsafe { libc::close(source_slave) };
+
+            let initial_target_ws = libc::winsize {
+                ws_row: 9,
+                ws_col: 21,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            if unsafe { libc::ioctl(target_master, libc::TIOCSWINSZ, &initial_target_ws) } != 0 {
+                unsafe {
+                    libc::close(source_master);
+                    libc::close(target_master);
+                    libc::close(target_slave);
+                }
+                return false;
+            }
+
+            let mut child_to_parent = [0; 2];
+            if unsafe { libc::pipe(child_to_parent.as_mut_ptr()) } != 0 {
+                unsafe {
+                    libc::close(source_master);
+                    libc::close(target_master);
+                    libc::close(target_slave);
+                }
+                return false;
+            }
+
+            match unsafe { fork() } {
+                Ok(ForkResult::Child) => {
+                    let _ = setpgid(Pid::from_raw(0), Pid::from_raw(0));
+                    unsafe {
+                        libc::close(child_to_parent[0]);
+                        libc::close(source_master);
+                        libc::close(target_master);
+                    }
+                    if unsafe { libc::dup2(target_slave, libc::STDIN_FILENO) } < 0 {
+                        std::process::exit(2);
+                    }
+                    unsafe { libc::close(target_slave) };
+
+                    let ready = [1u8; 1];
+                    let ready_write = unsafe {
+                        libc::write(
+                            child_to_parent[1],
+                            ready.as_ptr() as *const libc::c_void,
+                            ready.len(),
+                        )
+                    };
+                    if ready_write != 1 {
+                        std::process::exit(2);
+                    }
+
+                    let mut ok = false;
+                    for _ in 0..200 {
+                        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+                        if unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) }
+                            == 0
+                            && ws.ws_row == 55
+                            && ws.ws_col == 101
+                        {
+                            ok = true;
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+
+                    let marker = if ok { [1u8; 1] } else { [0u8; 1] };
+                    let _ = unsafe {
+                        libc::write(
+                            child_to_parent[1],
+                            marker.as_ptr() as *const libc::c_void,
+                            marker.len(),
+                        )
+                    };
+                    unsafe {
+                        libc::close(child_to_parent[1]);
+                    }
+                    std::process::exit(0);
+                }
+                Ok(ForkResult::Parent { child }) => {
+                    let _ = setpgid(child, child);
+                    unsafe {
+                        libc::close(target_slave);
+                        libc::close(child_to_parent[1]);
+                    }
+
+                    if read_one_byte(child_to_parent[0]) != Some(1) {
+                        unsafe {
+                            libc::close(source_master);
+                            libc::close(target_master);
+                            libc::close(child_to_parent[0]);
+                        }
+                        return false;
+                    }
+
+                    let desired = libc::winsize {
+                        ws_row: 55,
+                        ws_col: 101,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    if unsafe { libc::ioctl(source_master, libc::TIOCSWINSZ, &desired) } != 0 {
+                        unsafe {
+                            libc::close(source_master);
+                            libc::close(target_master);
+                            libc::close(child_to_parent[0]);
+                        }
+                        return false;
+                    }
+
+                    SIGWINCH_RECEIVED.store(true, Ordering::SeqCst);
+                    let exit_code = supervise_direct_child(child, true).ok();
+                    if exit_code != Some(0) {
+                        unsafe {
+                            libc::close(source_master);
+                            libc::close(target_master);
+                            libc::close(child_to_parent[0]);
+                        }
+                        return false;
+                    }
+
+                    let got = read_one_byte(child_to_parent[0]) == Some(1);
+
+                    unsafe {
+                        libc::close(source_master);
+                        libc::close(target_master);
+                        libc::close(child_to_parent[0]);
+                    }
+                    got
+                }
+                Err(_) => {
+                    unsafe {
+                        libc::close(source_master);
+                        libc::close(target_master);
+                        libc::close(target_slave);
+                        libc::close(child_to_parent[0]);
+                        libc::close(child_to_parent[1]);
+                    }
+                    false
+                }
+            }
+        }
+
+        assert!(unsafe { in_fork(child_fn) });
     }
 }

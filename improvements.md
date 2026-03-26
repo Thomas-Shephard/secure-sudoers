@@ -8,23 +8,11 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 1. Supervisor lineage control is incomplete
-1. **Location:** `crates/secure-sudoers/src/supervisor.rs::run_supervisor` + `crates/secure-sudoers/src/exec.rs::execute_securely`
-2. **Issue:** The supervisor waits only for its direct child; daemonized grandchildren can outlive supervision.
-3. **Impact:** Potential orphaned privileged workload and weak lifecycle control.
-4. **Suggested Direction:** Run command tree in a dedicated process group/cgroup and enforce kill-on-supervisor-exit semantics.
-
-### 2. TTY resize forwarding is effectively a no-op
-1. **Location:** `crates/secure-sudoers/src/supervisor.rs::forward_winsize` (around function body)
-2. **Issue:** `SIGWINCH` handling sets a flag, but no actual `winsize` propagation to child occurs.
-3. **Impact:** Fragile interactive behavior during terminal resize.
-4. **Suggested Direction:** Propagate resize via `TIOCSWINSZ` (or equivalent signal/session strategy) to child PTY/session.
-
 ### 3. Capability bounding drop errors are ignored
 1. **Location:** `crates/secure-sudoers/src/isolation.rs::drop_capabilities` (loop using `PR_CAPBSET_DROP`)
 2. **Issue:** Return values from `prctl(PR_CAPBSET_DROP, ...)` are discarded.
 3. **Impact:** Partial capability-drop failures may silently weaken isolation assumptions.
-4. **Suggested Direction:** Check each call result, fail closed on critical failures, and log failing capability index.
+4. **Suggested Direction:** Check each call result, fail closed on failures, and log failing capability index.
 
 ### 4. Path check vs mount still has race surface
 1. **Location:** `crates/secure-sudoers/src/isolation.rs` (`ensure_path_matches_fd`, `apply_private_mounts`, `apply_readonly_mounts`, `mount_shadow_fd`)
