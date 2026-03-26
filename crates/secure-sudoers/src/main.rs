@@ -104,11 +104,18 @@ fn main() {
             let cmd = result.command;
             let rule_id = result.rule_id;
 
-            let binary_hash = hash_binary_fd(cmd.binary().fd.as_raw_fd())
-                .unwrap_or_else(|e| {
-                    error!(txn_id = %txn_id, reason = %e, "binary hash computation failed — integrity check bypassed");
-                    String::new()
-                });
+            let binary_hash = match hash_binary_fd(cmd.binary().fd.as_raw_fd()) {
+                Ok(hash) => hash,
+                Err(e) => {
+                    error!(
+                        txn_id = %txn_id,
+                        reason = %e,
+                        "FATAL: binary hash computation failed — refusing approval"
+                    );
+                    eprintln!("FATAL: Cannot compute binary hash: {e}");
+                    std::process::exit(1);
+                }
+            };
 
             let redacted = redact_args(&raw_args, &policy, &tool_name);
             let ev = SecurityEvent {

@@ -8,23 +8,11 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 5. No explicit root-to-unprivileged credential transition for executed command
-1. **Location:** Runtime execution flow across `main.rs` → `supervisor.rs` → `exec.rs`
-2. **Issue:** No `setresuid/setresgid` path for launching allowed commands as a less-privileged identity.
-3. **Impact:** Larger blast radius if a permitted tool is compromised or misconfigured.
-4. **Suggested Direction:** Add optional policy-driven target UID/GID execution and strict privilege-drop ordering.
-
 ### 6. Invocation spoofing comparison is basename/token based
 1. **Location:** `crates/secure-sudoers/src/helpers.rs::parse_invocation_internal`
 2. **Issue:** `SUDO_COMMAND` is parsed via `split_whitespace` and compared by basename.
 3. **Impact:** Quoting/path ambiguity can cause false positives/false negatives in spoofing detection.
 4. **Suggested Direction:** Parse command lines robustly and compare canonical executable identity (inode/path), not only basename.
-
-### 7. Binary hash failure is non-fatal
-1. **Location:** `crates/secure-sudoers/src/main.rs` (hashing in approved path)
-2. **Issue:** Hash computation failure logs an error but execution proceeds with empty hash.
-3. **Impact:** Telemetry integrity degrades silently during critical integrity checks.
-4. **Suggested Direction:** Fail closed by default (or make fail-open explicit via policy flag with strong warning).
 
 ### 8. Telemetry JSON fallback can emit non-JSON
 1. **Location:** `crates/secure-sudoers-common/src/telemetry.rs::SecurityEvent::to_json_or_fallback`

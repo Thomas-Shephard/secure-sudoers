@@ -151,3 +151,46 @@ fn test_redaction_in_stdout_log() {
         .stdout(contains("[REDACTED]"))
         .stdout(contains("SECRET").not());
 }
+
+#[test]
+fn test_binary_hash_failure_is_fatal_for_approved_command() {
+    let dir = TempDir::new().unwrap();
+    let (sk, vk_bytes) = generate_keypair();
+    let pubkey_path = write_pubkey_pem(&dir, &vk_bytes);
+
+    // Use a directory as the binary so hashing fails
+    let non_regular_target = dir.path().join("not_a_binary_dir");
+    std::fs::create_dir(&non_regular_target).unwrap();
+
+    let policy_json = format!(
+        r#"{{
+  "version": "1.0",
+  "serial": 1,
+  "global_settings": {{
+    "log_destination": "stdout",
+    "log_format": "text",
+    "admin_contact": "Contact: security@example.com"
+  }},
+  "tools": {{
+    "noreadtrue": {{
+      "real_binary": "{}",
+      "help_description": "exec-only true",
+      "verbs": [],
+      "parameters": {{}}
+    }}
+  }}
+}}"#,
+        non_regular_target.to_string_lossy()
+    );
+
+    let policy_path = write_signed_policy(&dir, &policy_json, &sk);
+
+    ss_cmd()
+        .env("SECURE_SUDOERS_POLICY_PATH", &policy_path)
+        .env("SECURE_SUDOERS_PUBKEY_PATH", &pubkey_path)
+        .arg("noreadtrue")
+        .assert()
+        .failure()
+        .stdout(contains("Command approved").not())
+        .stderr(contains("Cannot compute binary hash"));
+}
