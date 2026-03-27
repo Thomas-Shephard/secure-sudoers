@@ -194,3 +194,68 @@ fn test_binary_hash_failure_is_fatal_for_approved_command() {
         .stdout(contains("Command approved").not())
         .stderr(contains("Cannot compute binary hash"));
 }
+
+#[test]
+fn test_binary_spoofing_event_includes_observed_binary_hash_when_available() {
+    let dir = TempDir::new().unwrap();
+    let (sk, vk_bytes) = generate_keypair();
+    let pubkey_path = write_pubkey_pem(&dir, &vk_bytes);
+
+    let true_path = if std::path::Path::new("/usr/bin/true").exists() {
+        "/usr/bin/true"
+    } else {
+        "/bin/true"
+    };
+    let false_path = if std::path::Path::new("/usr/bin/false").exists() {
+        "/usr/bin/false"
+    } else {
+        "/bin/false"
+    };
+    let spoofed_true = dir.path().join("true");
+    std::fs::copy(false_path, &spoofed_true).unwrap();
+
+    let expected_hash = {
+        let mut cmd = Command::new("sha256sum");
+        cmd.arg(&spoofed_true);
+        let out = cmd.assert().success().get_output().stdout.clone();
+        String::from_utf8(out)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+
+    let policy_json = format!(
+        r#"{{
+  "version": "1.0",
+  "serial": 1,
+  "global_settings": {{
+    "log_destination": "stdout",
+    "log_format": "json",
+    "admin_contact": "Contact: security@example.com"
+  }},
+  "tools": {{
+    "true": {{
+      "real_binary": "{}",
+      "help_description": "true command",
+      "verbs": [],
+      "parameters": {{}}
+    }}
+  }}
+}}"#,
+        true_path
+    );
+
+    let policy_path = write_signed_policy(&dir, &policy_json, &sk);
+
+    ss_cmd()
+        .env("SECURE_SUDOERS_POLICY_PATH", &policy_path)
+        .env("SECURE_SUDOERS_PUBKEY_PATH", &pubkey_path)
+        .env("SUDO_COMMAND", spoofed_true.to_string_lossy().to_string())
+        .arg("true")
+        .assert()
+        .failure()
+        .stdout(contains(expected_hash))
+        .stderr(contains("Spoofing attempt detected"));
+}

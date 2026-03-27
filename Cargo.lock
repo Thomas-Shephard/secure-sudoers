@@ -1307,6 +1307,7 @@ dependencies = [
  "secure-sudoers-common",
  "serde_json",
  "sha2",
+ "shlex",
  "tempfile",
  "tracing",
 ]

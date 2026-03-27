@@ -8,12 +8,6 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 6. Invocation spoofing comparison is basename/token based
-1. **Location:** `crates/secure-sudoers/src/helpers.rs::parse_invocation_internal`
-2. **Issue:** `SUDO_COMMAND` is parsed via `split_whitespace` and compared by basename.
-3. **Impact:** Quoting/path ambiguity can cause false positives/false negatives in spoofing detection.
-4. **Suggested Direction:** Parse command lines robustly and compare canonical executable identity (inode/path), not only basename.
-
 ### 8. Telemetry JSON fallback can emit non-JSON
 1. **Location:** `crates/secure-sudoers-common/src/telemetry.rs::SecurityEvent::to_json_or_fallback`
 2. **Issue:** Serialization fallback returns a plain string, not guaranteed JSON.

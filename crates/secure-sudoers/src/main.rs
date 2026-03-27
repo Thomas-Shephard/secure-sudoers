@@ -1,7 +1,9 @@
 #![cfg(target_os = "linux")]
 
 use secure_sudoers::exec::hash_binary_fd;
-use secure_sudoers::helpers::{load_policy, parse_invocation, redact_args};
+use secure_sudoers::helpers::{
+    load_policy, parse_invocation, redact_args, verify_sudo_command_binding,
+};
 use secure_sudoers::supervisor;
 use secure_sudoers_common::telemetry::{
     self, AccountType, ContextInfo, IdentityInfo, PolicyInfo, SecurityEvent,
@@ -104,6 +106,36 @@ fn main() {
             let cmd = result.command;
             let rule_id = result.rule_id;
 
+            if let Err(e) = verify_sudo_command_binding(&tool_name, cmd.binary()) {
+                let ev = SecurityEvent {
+                    event_id: telemetry::event_id::IDENTITY_SPOOFING.to_string(),
+                    txn_id: txn_id.clone(),
+                    timestamp: telemetry::rfc3339_now(),
+                    identity: identity.clone(),
+                    context: ContextInfo {
+                        tool: tool_name.clone(),
+                        binary_path: cmd.binary().path.clone(),
+                        binary_hash: e
+                            .observed_sudo_path()
+                            .and_then(hash_path_for_telemetry)
+                            .unwrap_or_default(),
+                    },
+                    policy: PolicyInfo {
+                        status: "error".to_string(),
+                        rule_id: Some(rule_id.clone()),
+                        reason: Some("invocation_error".to_string()),
+                    },
+                    args: vec![],
+                };
+                error!(
+                    security_event_json = %ev.to_json_or_fallback(),
+                    reason = %e,
+                    "Invocation spoofing verification failed"
+                );
+                eprintln!("FATAL: {e}");
+                std::process::exit(1);
+            }
+
             let binary_hash = match hash_binary_fd(cmd.binary().fd.as_raw_fd()) {
                 Ok(hash) => hash,
                 Err(e) => {
@@ -185,6 +217,19 @@ fn generate_txn_id() -> String {
             .as_nanos();
         format!("{:08x}", (std::process::id() as u128 ^ nanos) as u32)
     }
+}
+
+fn hash_path_for_telemetry(path: &str) -> Option<String> {
+    use std::ffi::CString;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let c_path = CString::new(path).ok()?;
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return None;
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    hash_binary_fd(fd.as_raw_fd()).ok()
 }
 
 fn resolve_identity_triad() -> IdentityInfo {

@@ -1,6 +1,10 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use secure_sudoers_common::models::{ParameterConfig, ParameterType, SecureSudoersPolicy};
+use secure_sudoers_common::models::{
+    ParameterConfig, ParameterType, SecurePath, SecureSudoersPolicy,
+};
 use std::collections::HashMap;
+use std::io::ErrorKind;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use tracing::{error, warn};
 
@@ -21,57 +25,63 @@ where
         return Ok((String::new(), vec![]));
     }
 
-    let (argv_tool_name, args) = {
+    let (argv_tool_token, argv_tool_name, args) = {
         let exe_path = Path::new(&raw_argv[0]);
         let exe_name = exe_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if exe_name == "secure-sudoers" || exe_name == "secure_sudoers" {
             if raw_argv.len() < 2 {
-                (String::new(), vec![])
+                (String::new(), String::new(), vec![])
             } else {
-                (raw_argv[1].clone(), raw_argv[2..].to_vec())
+                (
+                    raw_argv[1].clone(),
+                    basename(&raw_argv[1]).to_string(),
+                    raw_argv[2..].to_vec(),
+                )
             }
         } else {
-            (exe_name.to_string(), raw_argv[1..].to_vec())
+            (
+                raw_argv[0].clone(),
+                exe_name.to_string(),
+                raw_argv[1..].to_vec(),
+            )
         }
     };
 
     match get_env("SUDO_COMMAND") {
         Some(sudo_cmd) => {
-            let mut tokens = sudo_cmd.split_whitespace();
-            let first_token = tokens.next().unwrap_or("");
-            let first_path = Path::new(first_token);
-            let first_name = first_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(first_token);
+            let tokens = shlex::split(&sudo_cmd).ok_or_else(|| {
+                "Spoofing attempt detected: invalid SUDO_COMMAND format (shell parsing failed)"
+                    .to_string()
+            })?;
 
-            let sudo_tool_name = if (first_name == "secure-sudoers"
+            let first_token = tokens.first().map(String::as_str).unwrap_or("");
+            let first_name = basename(first_token);
+
+            let sudo_tool_token = if (first_name == "secure-sudoers"
                 || first_name == "secure_sudoers")
                 && !first_token.is_empty()
             {
-                tokens
-                    .next()
-                    .map(|s| {
-                        Path::new(s)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or(s)
-                    })
-                    .unwrap_or("")
+                tokens.get(1).cloned().unwrap_or_default()
             } else {
-                first_name
+                first_token.to_string()
             };
 
-            let argv_tool_basename = Path::new(&argv_tool_name)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&argv_tool_name);
-            let sudo_tool_basename = Path::new(sudo_tool_name)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(sudo_tool_name);
+            if sudo_tool_token.is_empty() {
+                error!(
+                    argv0 = %raw_argv[0],
+                    sudo_command = %sudo_cmd,
+                    "CRITICAL: Spoofing attempt detected! SUDO_COMMAND missing delegated command."
+                );
+                return Err(
+                    "Spoofing attempt detected: SUDO_COMMAND is missing delegated command token"
+                        .to_string(),
+                );
+            }
 
-            if !sudo_tool_basename.is_empty() && sudo_tool_basename != argv_tool_basename {
+            let argv_tool_basename = basename(&argv_tool_token);
+            let sudo_tool_basename = basename(&sudo_tool_token);
+
+            if sudo_tool_basename != argv_tool_basename {
                 error!(
                     argv0 = %raw_argv[0],
                     sudo_tool = %sudo_tool_basename,
@@ -91,6 +101,211 @@ where
             Ok((argv_tool_name, args))
         }
     }
+}
+
+fn basename(token: &str) -> &str {
+    Path::new(token)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(token)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExecutableIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SudoBindingError {
+    message: String,
+    observed_sudo_path: Option<String>,
+}
+
+impl SudoBindingError {
+    fn new(message: impl Into<String>, observed_sudo_path: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            observed_sudo_path,
+        }
+    }
+
+    pub fn observed_sudo_path(&self) -> Option<&str> {
+        self.observed_sudo_path.as_deref()
+    }
+}
+
+impl std::fmt::Display for SudoBindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SudoBindingError {}
+
+pub fn verify_sudo_command_binding(
+    tool_name: &str,
+    expected_binary: &SecurePath,
+) -> Result<(), SudoBindingError> {
+    verify_sudo_command_binding_internal(tool_name, expected_binary, |v| std::env::var(v).ok())
+}
+
+fn verify_sudo_command_binding_internal<F>(
+    tool_name: &str,
+    expected_binary: &SecurePath,
+    get_env: F,
+) -> Result<(), SudoBindingError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(sudo_cmd) = get_env("SUDO_COMMAND") else {
+        return Ok(());
+    };
+
+    let tokens = shlex::split(&sudo_cmd).ok_or_else(|| {
+        SudoBindingError::new(
+            "Spoofing attempt detected: invalid SUDO_COMMAND format",
+            None,
+        )
+    })?;
+
+    let first_token = tokens.first().map(String::as_str).unwrap_or("");
+    let first_name = basename(first_token);
+    let sudo_tool_token = if (first_name == "secure-sudoers" || first_name == "secure_sudoers")
+        && !first_token.is_empty()
+    {
+        tokens.get(1).cloned().unwrap_or_default()
+    } else {
+        first_token.to_string()
+    };
+
+    if sudo_tool_token.is_empty() {
+        error!(
+            expected_tool = %tool_name,
+            sudo_command = %sudo_cmd,
+            "CRITICAL: Spoofing attempt detected! SUDO_COMMAND missing delegated command."
+        );
+        return Err(SudoBindingError::new(
+            "Spoofing attempt detected: SUDO_COMMAND is missing delegated command token",
+            None,
+        ));
+    }
+
+    let expected_tool_basename = basename(tool_name);
+    let sudo_tool_basename = basename(&sudo_tool_token);
+    if sudo_tool_basename != expected_tool_basename {
+        error!(
+            expected_tool = %expected_tool_basename,
+            sudo_tool = %sudo_tool_basename,
+            "CRITICAL: Spoofing attempt detected! Invocation mismatch with SUDO_COMMAND."
+        );
+        return Err(SudoBindingError::new(
+            format!(
+                "Spoofing attempt detected: command '{}' does not match SUDO_COMMAND '{}'",
+                expected_tool_basename, sudo_tool_basename
+            ),
+            if sudo_tool_token.contains('/') {
+                Some(sudo_tool_token.clone())
+            } else {
+                None
+            },
+        ));
+    }
+
+    if !sudo_tool_token.contains('/') {
+        return Ok(());
+    }
+
+    let sudo_identity = executable_identity_from_path(&sudo_tool_token).map_err(|e| {
+        let failure_kind = if e.contains("file does not exist") {
+            "not_found"
+        } else if e.contains("permission denied") {
+            "permission_denied"
+        } else {
+            "io_error"
+        };
+        error!(
+            sudo_tool = %sudo_tool_token,
+            failure_kind,
+            reason = %e,
+            "CRITICAL: Spoofing attempt detected! Unable to verify SUDO_COMMAND executable identity."
+        );
+        SudoBindingError::new(
+            "Spoofing attempt detected: unable to verify executable identity",
+            Some(sudo_tool_token.clone()),
+        )
+    })?;
+    let expected_identity =
+        executable_identity_from_fd(expected_binary.fd.as_raw_fd()).map_err(|e| {
+            error!(
+                expected_path = %expected_binary.path,
+                reason = %e,
+                "CRITICAL: Spoofing attempt detected! Unable to verify validated executable identity."
+            );
+            SudoBindingError::new(
+                "Spoofing attempt detected: unable to verify executable identity",
+                Some(expected_binary.path.clone()),
+            )
+        })?;
+
+    if sudo_identity != expected_identity {
+        error!(
+            expected_tool = %expected_tool_basename,
+            expected_path = %expected_binary.path,
+            sudo_tool = %sudo_tool_token,
+            "CRITICAL: Spoofing attempt detected! Executable identity mismatch."
+        );
+        return Err(SudoBindingError::new(
+            format!(
+                "Spoofing attempt detected: executable identity mismatch for command '{}'",
+                expected_tool_basename
+            ),
+            Some(sudo_tool_token.clone()),
+        ));
+    }
+
+    Ok(())
+}
+
+fn executable_identity_from_path(path: &str) -> Result<ExecutableIdentity, String> {
+    use std::ffi::CString;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let c_path = CString::new(path)
+        .map_err(|_| format!("cannot open executable path '{}': invalid NUL byte", path))?;
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(match err.kind() {
+            ErrorKind::NotFound => {
+                format!(
+                    "cannot open executable path '{}': file does not exist",
+                    path
+                )
+            }
+            ErrorKind::PermissionDenied => {
+                format!("cannot open executable path '{}': permission denied", path)
+            }
+            _ => format!("cannot open executable path '{}': {}", path, err),
+        });
+    }
+
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    executable_identity_from_fd(fd.as_raw_fd())
+        .map_err(|e| format!("cannot stat executable path '{}': {}", path, e))
+}
+
+fn executable_identity_from_fd(fd: i32) -> Result<ExecutableIdentity, String> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, st.as_mut_ptr()) } != 0 {
+        return Err(format!("fstat failed: {}", std::io::Error::last_os_error()));
+    }
+    let st = unsafe { st.assume_init() };
+
+    Ok(ExecutableIdentity {
+        dev: st.st_dev,
+        ino: st.st_ino,
+    })
 }
 
 pub fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
@@ -304,6 +519,7 @@ mod tests {
     use super::*;
     use secure_sudoers_common::models::{ParameterConfig, ParameterType, UnauthorizedAuditMode};
     use secure_sudoers_common::testing::fixtures::{args as argv, make_policy};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn test_redact_args_clustered_with_separate_value() {
@@ -521,16 +737,21 @@ mod tests {
 
     #[test]
     fn sudo_command_prioritized_and_matches() {
+        let true_path = if Path::new("/usr/bin/true").exists() {
+            "/usr/bin/true"
+        } else {
+            "/bin/true"
+        };
         let env = |k: &str| -> Option<String> {
             if k == "SUDO_COMMAND" {
-                Some("/usr/bin/apt install".to_string())
+                Some(format!("{true_path} install"))
             } else {
                 None
             }
         };
         let (tool, args) =
-            parse_invocation_internal(&argv(&["secure-sudoers", "apt", "install"]), env).unwrap();
-        assert_eq!(tool, "apt");
+            parse_invocation_internal(&argv(&["secure-sudoers", "true", "install"]), env).unwrap();
+        assert_eq!(tool, "true");
         assert_eq!(args, argv(&["install"]));
     }
 
@@ -556,32 +777,233 @@ mod tests {
     }
 
     #[test]
+    fn sudo_command_missing_falls_back_to_subcommand_basename() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let tool_path = dir.path().join("custom-tool");
+        std::fs::write(&tool_path, b"#!/bin/sh\nexit 0\n").unwrap();
+
+        let env = |_: &str| -> Option<String> { None };
+        let (tool, args) = parse_invocation_internal(
+            &argv(&[
+                "secure-sudoers",
+                tool_path.to_str().unwrap(),
+                "--flag",
+                "value",
+            ]),
+            env,
+        )
+        .unwrap();
+        assert_eq!(tool, "custom-tool");
+        assert_eq!(args, argv(&["--flag", "value"]));
+    }
+
+    #[test]
     fn sudo_command_basename_extraction() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let tool_path = dir.path().join("apt");
+        std::fs::write(&tool_path, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&tool_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tool_path, perms).unwrap();
+
         let env = |k: &str| -> Option<String> {
             if k == "SUDO_COMMAND" {
-                Some("/usr/local/bin/apt install".to_string())
+                Some(format!("{} install", tool_path.to_string_lossy()))
             } else {
                 None
             }
         };
-        let (tool, _) =
-            parse_invocation_internal(&argv(&["secure-sudoers", "/usr/bin/apt", "install"]), env)
-                .unwrap();
+        let (tool, _) = parse_invocation_internal(
+            &argv(&["secure-sudoers", tool_path.to_str().unwrap(), "install"]),
+            env,
+        )
+        .unwrap();
         assert_eq!(tool, "apt");
     }
 
     #[test]
     fn sudo_command_with_wrapper_skipped() {
+        let true_path = if Path::new("/usr/bin/true").exists() {
+            "/usr/bin/true"
+        } else {
+            "/bin/true"
+        };
         let env = |k: &str| -> Option<String> {
             if k == "SUDO_COMMAND" {
-                Some("/usr/local/bin/secure-sudoers apt install".to_string())
+                Some(format!("/usr/local/bin/secure-sudoers {true_path} install"))
             } else {
                 None
             }
         };
         let (tool, _) =
-            parse_invocation_internal(&argv(&["secure-sudoers", "apt", "install"]), env).unwrap();
+            parse_invocation_internal(&argv(&["secure-sudoers", "true", "install"]), env).unwrap();
+        assert_eq!(tool, "true");
+    }
+
+    #[test]
+    fn sudo_command_wrapper_without_subcommand_fails_closed() {
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some("/usr/local/bin/secure-sudoers".to_string())
+            } else {
+                None
+            }
+        };
+
+        let result = parse_invocation_internal(&argv(&["secure-sudoers", "true", "install"]), env);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Spoofing attempt detected"));
+    }
+
+    #[test]
+    fn sudo_command_quoted_tool_path_is_parsed_correctly() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let spaced_dir = dir.path().join("dir with space");
+        std::fs::create_dir_all(&spaced_dir).unwrap();
+        let tool_path = spaced_dir.join("apt");
+        std::fs::write(&tool_path, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&tool_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&tool_path, perms).unwrap();
+
+        let sudo_cmd = format!("\"{}\" install", tool_path.to_string_lossy());
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some(sudo_cmd.clone())
+            } else {
+                None
+            }
+        };
+
+        let (tool, args) = parse_invocation_internal(
+            &argv(&[
+                "secure-sudoers",
+                tool_path.to_str().unwrap(),
+                "install",
+                "curl",
+            ]),
+            env,
+        )
+        .unwrap();
+
         assert_eq!(tool, "apt");
+        assert_eq!(args, argv(&["install", "curl"]));
+    }
+
+    #[test]
+    fn verify_sudo_command_binding_path_identity_mismatch_detected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let left_dir = dir.path().join("left");
+        let right_dir = dir.path().join("right");
+        std::fs::create_dir_all(&left_dir).unwrap();
+        std::fs::create_dir_all(&right_dir).unwrap();
+
+        let sudo_tool = left_dir.join("apt");
+        let argv_tool = right_dir.join("apt");
+        std::fs::write(&sudo_tool, b"left\n").unwrap();
+        std::fs::write(&argv_tool, b"right\n").unwrap();
+        let mut left_perms = std::fs::metadata(&sudo_tool).unwrap().permissions();
+        left_perms.set_mode(0o755);
+        std::fs::set_permissions(&sudo_tool, left_perms).unwrap();
+        let mut right_perms = std::fs::metadata(&argv_tool).unwrap().permissions();
+        right_perms.set_mode(0o755);
+        std::fs::set_permissions(&argv_tool, right_perms).unwrap();
+
+        let expected_binary = open_path(sudo_tool.to_str().unwrap());
+        let sudo_cmd = format!("{} install", argv_tool.to_string_lossy());
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some(sudo_cmd.clone())
+            } else {
+                None
+            }
+        };
+
+        let result = verify_sudo_command_binding_internal("apt", &expected_binary, env);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("executable identity mismatch for command")
+        );
+    }
+
+    #[test]
+    fn verify_sudo_command_binding_absolute_path_missing_fails_closed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let true_path = if Path::new("/usr/bin/true").exists() {
+            "/usr/bin/true"
+        } else {
+            "/bin/true"
+        };
+        let expected_binary = open_path(true_path);
+
+        let missing_tool = dir.path().join("true");
+        let missing_tool_str = missing_tool.to_string_lossy().to_string();
+
+        let sudo_cmd = format!("{missing_tool_str} install");
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some(sudo_cmd.clone())
+            } else {
+                None
+            }
+        };
+
+        let result = verify_sudo_command_binding_internal("true", &expected_binary, env);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unable to verify executable identity")
+        );
+    }
+
+    #[test]
+    fn verify_sudo_command_binding_bare_name_match_ok() {
+        let true_path = if Path::new("/usr/bin/true").exists() {
+            "/usr/bin/true"
+        } else {
+            "/bin/true"
+        };
+        let expected_binary = open_path(true_path);
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some("true install".to_string())
+            } else {
+                None
+            }
+        };
+
+        assert!(verify_sudo_command_binding_internal("true", &expected_binary, env).is_ok());
+    }
+
+    #[test]
+    fn verify_sudo_command_binding_wrapper_without_subcommand_fails_closed() {
+        let true_path = if Path::new("/usr/bin/true").exists() {
+            "/usr/bin/true"
+        } else {
+            "/bin/true"
+        };
+        let expected_binary = open_path(true_path);
+        let env = |k: &str| -> Option<String> {
+            if k == "SUDO_COMMAND" {
+                Some("/usr/local/bin/secure-sudoers".to_string())
+            } else {
+                None
+            }
+        };
+
+        let result = verify_sudo_command_binding_internal("true", &expected_binary, env);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Spoofing attempt detected")
+        );
     }
 
     use ed25519_dalek::{Signer, SigningKey};
