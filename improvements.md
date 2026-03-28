@@ -8,12 +8,6 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 8. Telemetry JSON fallback can emit non-JSON
-1. **Location:** `crates/secure-sudoers-common/src/telemetry.rs::SecurityEvent::to_json_or_fallback`
-2. **Issue:** Serialization fallback returns a plain string, not guaranteed JSON.
-3. **Impact:** Can break downstream structured logging and SIEM parsing.
-4. **Suggested Direction:** Emit a minimal guaranteed-valid JSON fallback envelope.
-
 ### 9. Policy knobs appear unused at runtime
 1. **Location:** `crates/secure-sudoers-common/src/models.rs` (`bypass_groups`, `dry_run`) vs runtime crates
 2. **Issue:** These fields are present in policy model but not exercised in execution flow.

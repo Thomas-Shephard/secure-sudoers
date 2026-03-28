@@ -64,12 +64,30 @@ pub struct SecurityEvent {
 
 impl SecurityEvent {
     pub fn to_json_or_fallback(&self) -> String {
-        serde_json::to_string(self).unwrap_or_else(|e| {
-            format!(
-                "CRITICAL: JSON serialization failed for event_id={} txn_id={}: {}",
-                self.event_id, self.txn_id, e
-            )
+        self.to_json_with_serializer(serde_json::to_string)
+    }
+
+    fn fallback_json_envelope(&self, error: &serde_json::Error) -> String {
+        let envelope = serde_json::json!({
+            "event_id": self.event_id,
+            "txn_id": self.txn_id,
+            "timestamp": self.timestamp,
+            "fallback": {
+                "kind": "serialization_failure",
+                "message": error.to_string(),
+            }
+        });
+
+        serde_json::to_string(&envelope).unwrap_or_else(|_| {
+            "{\"fallback\":{\"kind\":\"serialization_failure\",\"message\":\"failed to encode fallback envelope\"}}".to_string()
         })
+    }
+
+    fn to_json_with_serializer<F>(&self, serializer: F) -> String
+    where
+        F: FnOnce(&Self) -> Result<String, serde_json::Error>,
+    {
+        serializer(self).unwrap_or_else(|e| self.fallback_json_envelope(&e))
     }
 }
 
@@ -171,5 +189,50 @@ mod tests {
         };
         let out = ev.to_json_or_fallback();
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_to_json_or_fallback_emits_valid_json_when_serializer_fails() {
+        let ev = SecurityEvent {
+            event_id: event_id::COMMAND_APPROVED.to_string(),
+            txn_id: "abc12345".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            identity: IdentityInfo {
+                user: "alice".to_string(),
+                uid: 1000,
+                euid: 0,
+                sudo_uid: Some(1000),
+                account_type: AccountType::Local,
+            },
+            context: ContextInfo {
+                tool: "apt".to_string(),
+                binary_path: "/usr/bin/apt".to_string(),
+                binary_hash: "deadbeef".to_string(),
+            },
+            policy: PolicyInfo {
+                status: "allowed".to_string(),
+                rule_id: Some("apt".to_string()),
+                reason: None,
+            },
+            args: vec!["install".to_string()],
+        };
+
+        let out = ev.to_json_with_serializer(|_| {
+            Err(serde_json::Error::io(std::io::Error::other(
+                "mock serializer failure",
+            )))
+        });
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("fallback output must remain valid JSON");
+        assert_eq!(parsed["event_id"], "SEC-101");
+        assert_eq!(parsed["txn_id"], "abc12345");
+        assert_eq!(parsed["timestamp"], "2026-01-01T00:00:00Z");
+        assert_eq!(parsed["fallback"]["kind"], "serialization_failure");
+        assert!(
+            parsed["fallback"]["message"]
+                .as_str()
+                .expect("fallback message must be a string")
+                .contains("mock serializer failure")
+        );
     }
 }
