@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: never
   RUSTFLAGS: "-D warnings"
@@ -14,21 +18,16 @@ jobs:
   lint:
     name: Format & Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install stable toolchain
-        run: rustup toolchain install stable --component rustfmt,clippy --no-self-update
-      - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: dtolnay/rust-toolchain@stable
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-lint-
+          components: rustfmt, clippy
+      - name: Cache Rust dependencies and build outputs
+        uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Clippy (all features)
@@ -37,6 +36,7 @@ jobs:
   test:
     name: Privileged Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,8 +49,10 @@ jobs:
           file: tests/Dockerfile
           load: true
           tags: secure-sudoers-test:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          pull: true
+          provenance: false
+          cache-from: type=gha,scope=privileged-tests
+          cache-to: type=gha,mode=max,scope=privileged-tests
       - name: Run Privileged Tests
         run: |
           docker run --rm --privileged -v ${{ github.workspace }}:/output secure-sudoers-test:latest \
