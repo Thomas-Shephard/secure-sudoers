@@ -26,7 +26,6 @@ pub mod fixtures {
                 real_binary: tail_bin_str,
                 verbs: vec![],
                 parameters: tail_params,
-                disallowed_positional_args: vec![],
                 positional: Some(ParameterConfig::path()),
                 help_description: "tail".to_string(),
                 isolation: None,
@@ -48,7 +47,6 @@ pub mod fixtures {
                 real_binary: apt_bin_str,
                 verbs: vec!["update".to_string(), "install".to_string()],
                 parameters: apt_params,
-                disallowed_positional_args: vec![],
                 positional: None,
                 help_description: "apt".to_string(),
                 isolation: Some(IsolationSettings {
@@ -101,7 +99,6 @@ pub mod fixtures {
             real_binary: real_binary.to_string(),
             verbs: vec![],
             parameters: HashMap::new(),
-            disallowed_positional_args: vec![],
             positional: Some(ParameterConfig::path()),
             help_description: "test tool".to_string(),
             isolation: None,

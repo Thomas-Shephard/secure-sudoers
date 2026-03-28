@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
+use std::sync::OnceLock;
 
 pub struct SecurePath {
     pub path: String,
@@ -66,27 +67,46 @@ pub struct ParameterConfig {
     #[serde(default)]
     pub sensitive: bool,
     pub regex: Option<String>,
-    pub choices: Option<Vec<String>>,
+    #[serde(skip)]
+    pub compiled_regex: Option<regex::Regex>,
+    pub allowed: Option<Vec<String>>,
+    pub disallowed: Option<Vec<String>>,
     pub help: Option<String>,
 }
 
 impl ParameterConfig {
+    pub(crate) fn is_explicitly_disallowed(&self, val: &str) -> bool {
+        if let Some(ref disallowed) = self.disallowed {
+            disallowed.iter().any(|entry| entry == val)
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn matches_allowed_or_regex(&self, val: &str) -> bool {
+        let allowed_match = self
+            .allowed
+            .as_ref()
+            .map(|allowed| allowed.iter().any(|entry| entry == val));
+        let regex_match = self.regex.as_ref().map(|_| {
+            self.compiled_regex
+                .as_ref()
+                .is_some_and(|re| re.is_match(val))
+        });
+
+        match (allowed_match, regex_match) {
+            (Some(allowed), Some(regex)) => allowed || regex,
+            (Some(allowed), None) => allowed,
+            (None, Some(regex)) => regex,
+            (None, None) => true,
+        }
+    }
+
     pub fn matches(&self, val: &str) -> bool {
-        if let Some(ref choices) = self.choices
-            && !choices.contains(&val.to_string())
-        {
+        if self.is_explicitly_disallowed(val) {
             return false;
         }
-        if let Some(ref regex_str) = self.regex {
-            if let Ok(re) = regex::Regex::new(regex_str) {
-                if !re.is_match(val) {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-        true
+        self.matches_allowed_or_regex(val)
     }
 
     pub fn any(t: ParameterType) -> Self {
@@ -94,7 +114,9 @@ impl ParameterConfig {
             param_type: t,
             sensitive: false,
             regex: None,
-            choices: None,
+            compiled_regex: None,
+            allowed: None,
+            disallowed: None,
             help: None,
         }
     }
@@ -117,12 +139,18 @@ impl ParameterConfig {
     }
 
     pub fn regex(mut self, r: String) -> Self {
+        self.compiled_regex = regex::Regex::new(&r).ok();
         self.regex = Some(r);
         self
     }
 
-    pub fn choices(mut self, c: Vec<String>) -> Self {
-        self.choices = Some(c);
+    pub fn allowed(mut self, entries: Vec<String>) -> Self {
+        self.allowed = Some(entries);
+        self
+    }
+
+    pub fn disallowed(mut self, values: Vec<String>) -> Self {
+        self.disallowed = Some(values);
         self
     }
 }
@@ -174,8 +202,6 @@ pub struct ToolPolicy {
     pub verbs: Vec<String>,
     #[serde(default)]
     pub parameters: HashMap<String, ParameterConfig>,
-    #[serde(default)]
-    pub disallowed_positional_args: Vec<String>,
     pub positional: Option<ParameterConfig>,
     pub help_description: String,
     pub isolation: Option<IsolationSettings>,
@@ -275,15 +301,89 @@ impl std::fmt::Display for ValidationContext {
     }
 }
 
+static TOOL_NAME_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+
 pub fn is_valid_tool_name(name: &str) -> bool {
     if name.is_empty() || name == "." || name == ".." {
         return false;
     }
 
-    match regex::Regex::new(r"^[a-zA-Z0-9._+-]+$") {
-        Ok(re) => re.is_match(name),
-        Err(_) => false,
+    TOOL_NAME_REGEX
+        .get_or_init(|| {
+            regex::Regex::new(r"^[a-zA-Z0-9._+-]+$").expect("tool-name regex literal must compile")
+        })
+        .is_match(name)
+}
+
+fn canonicalize_path_list_entries(
+    entries: &mut Vec<String>,
+    list_name: &str,
+    tool_name: &str,
+    config_label: &str,
+) -> Result<(), String> {
+    let mut canonicalized = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let path = std::path::Path::new(entry);
+        if !path.is_absolute() {
+            return Err(format!(
+                "{} entry '{}' for {} in tool '{}' must be an absolute path",
+                list_name, entry, config_label, tool_name
+            ));
+        }
+
+        match std::fs::canonicalize(path) {
+            Ok(path) => canonicalized.push(path.to_string_lossy().into_owned()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => canonicalized.push(entry.clone()),
+            Err(e) => {
+                return Err(format!(
+                    "Security failure: cannot canonicalize {} path '{}' for {} in tool '{}': {}",
+                    list_name, entry, config_label, tool_name, e
+                ));
+            }
+        }
     }
+    *entries = canonicalized;
+    Ok(())
+}
+
+fn canonicalize_path_list_config_entries(
+    config: &mut ParameterConfig,
+    tool_name: &str,
+    config_label: &str,
+) -> Result<(), String> {
+    if config.param_type != ParameterType::Path {
+        return Ok(());
+    }
+
+    if let Some(allowed) = config.allowed.as_mut() {
+        canonicalize_path_list_entries(allowed, "allowed", tool_name, config_label)?;
+    }
+
+    if let Some(disallowed) = config.disallowed.as_mut() {
+        canonicalize_path_list_entries(disallowed, "disallowed", tool_name, config_label)?;
+    }
+
+    Ok(())
+}
+
+fn compile_parameter_regex(
+    config: &mut ParameterConfig,
+    tool_name: &str,
+    config_label: &str,
+) -> Result<(), String> {
+    if let Some(regex_str) = config.regex.as_ref() {
+        let compiled = regex::Regex::new(regex_str).map_err(|_| {
+            format!(
+                "Invalid regex '{}' in {} for tool '{}'",
+                regex_str, config_label, tool_name
+            )
+        })?;
+        config.compiled_regex = Some(compiled);
+    } else {
+        config.compiled_regex = None;
+    }
+
+    Ok(())
 }
 
 impl SecureSudoersPolicy {
@@ -312,7 +412,7 @@ impl SecureSudoersPolicy {
         }
         self.global_settings.blocked_paths = canonicalized_blocked;
 
-        for (name, tool) in &self.tools {
+        for (name, tool) in &mut self.tools {
             if !is_valid_tool_name(name) {
                 return Err(format!("Invalid tool name in policy: '{}'", name));
             }
@@ -322,24 +422,17 @@ impl SecureSudoersPolicy {
                     name
                 ));
             }
-            for (flag, config) in &tool.parameters {
-                if let Some(ref regex_str) = config.regex
-                    && regex::Regex::new(regex_str).is_err()
-                {
-                    return Err(format!(
-                        "Invalid regex '{}' in parameter '{}' for tool '{}'",
-                        regex_str, flag, name
-                    ));
-                }
+            for (flag, config) in &mut tool.parameters {
+                compile_parameter_regex(config, name, &format!("parameter '{}'", flag))?;
+                canonicalize_path_list_config_entries(
+                    config,
+                    name,
+                    &format!("parameter '{}'", flag),
+                )?;
             }
-            if let Some(ref pos_config) = tool.positional
-                && let Some(ref regex_str) = pos_config.regex
-                && regex::Regex::new(regex_str).is_err()
-            {
-                return Err(format!(
-                    "Invalid regex '{}' in positional config for tool '{}'",
-                    regex_str, name
-                ));
+            if let Some(ref mut pos_config) = tool.positional {
+                compile_parameter_regex(pos_config, name, "positional config")?;
+                canonicalize_path_list_config_entries(pos_config, name, "positional config")?;
             }
         }
         Ok(())
@@ -430,12 +523,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parameter_config_matches_choices() {
+    fn test_parameter_config_matches_allowed() {
         let config = ParameterConfig {
             param_type: ParameterType::String,
             sensitive: false,
             regex: None,
-            choices: Some(vec!["prod".into(), "stage".into()]),
+            compiled_regex: None,
+            allowed: Some(vec!["prod".into(), "stage".into()]),
+            disallowed: None,
             help: None,
         };
         assert!(config.matches("prod"));
@@ -444,12 +539,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parameter_config_disallowed_overrides_allowed() {
+        let config = ParameterConfig {
+            param_type: ParameterType::String,
+            sensitive: false,
+            regex: None,
+            compiled_regex: None,
+            allowed: Some(vec!["prod".into()]),
+            disallowed: Some(vec!["prod".into()]),
+            help: None,
+        };
+        assert!(!config.matches("prod"));
+    }
+
+    #[test]
     fn test_parameter_config_matches_regex() {
         let config = ParameterConfig {
             param_type: ParameterType::String,
             sensitive: false,
             regex: Some(r"^\d+$".into()),
-            choices: None,
+            compiled_regex: Some(regex::Regex::new(r"^\d+$").unwrap()),
+            allowed: None,
+            disallowed: None,
             help: None,
         };
         assert!(config.matches("123"));
@@ -513,12 +624,198 @@ mod tests {
                 param_type: ParameterType::String,
                 sensitive: false,
                 regex: Some("[unclosed".to_string()),
-                choices: None,
+                compiled_regex: None,
+                allowed: None,
+                disallowed: None,
                 help: None,
             },
         );
         p.tools.insert("mytool".to_string(), tool);
         let err = p.validate().unwrap_err();
         assert!(err.contains("Invalid regex"), "got: {err}");
+    }
+
+    #[test]
+    fn test_policy_validate_relative_disallowed_positional_path_for_path_tool() {
+        let mut p = make_valid_policy();
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.positional =
+            Some(ParameterConfig::path().disallowed(vec!["relative/path".to_string()]));
+        p.tools.insert("mytool".to_string(), tool);
+
+        let err = p.validate().unwrap_err();
+        assert!(
+            err.contains("must be an absolute path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_policy_validate_non_path_tool_allows_relative_disallowed_positional() {
+        let mut p = make_valid_policy();
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.positional =
+            Some(ParameterConfig::string().disallowed(vec!["relative/path".to_string()]));
+        p.tools.insert("mytool".to_string(), tool);
+
+        assert!(p.validate().is_ok(), "unexpected validation failure");
+    }
+
+    #[test]
+    fn test_policy_validate_disallowed_positional_path_canonicalization_symlink_loop_error() {
+        let mut p = make_valid_policy();
+        let tmp = tempfile::tempdir().unwrap();
+        let loop_a = tmp.path().join("loop_a");
+        let loop_b = tmp.path().join("loop_b");
+        std::os::unix::fs::symlink(&loop_b, &loop_a).unwrap();
+        std::os::unix::fs::symlink(&loop_a, &loop_b).unwrap();
+
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.positional =
+            Some(ParameterConfig::path().disallowed(vec![loop_a.to_string_lossy().into_owned()]));
+        p.tools.insert("mytool".to_string(), tool);
+
+        let err = p.validate().unwrap_err();
+        assert!(
+            err.contains("cannot canonicalize disallowed path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_policy_validate_canonicalizes_disallowed_path_parameter_entries() {
+        let mut p = make_valid_policy();
+        let tmp = tempfile::tempdir().unwrap();
+        let real_file = tmp.path().join("real");
+        let symlink_file = tmp.path().join("link");
+
+        std::fs::write(&real_file, "x").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.parameters.insert(
+            "--file".to_string(),
+            ParameterConfig::path().disallowed(vec![symlink_file.to_string_lossy().into_owned()]),
+        );
+        p.tools.insert("mytool".to_string(), tool);
+
+        p.validate().unwrap();
+        let canonical = std::fs::canonicalize(&real_file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let cfg = p
+            .tools
+            .get("mytool")
+            .unwrap()
+            .parameters
+            .get("--file")
+            .unwrap();
+        assert_eq!(cfg.disallowed.as_ref().unwrap(), &vec![canonical]);
+    }
+
+    #[test]
+    fn test_policy_validate_parameter_disallowed_path_requires_absolute() {
+        let mut p = make_valid_policy();
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.parameters.insert(
+            "--file".to_string(),
+            ParameterConfig::path().disallowed(vec!["relative/path".to_string()]),
+        );
+        p.tools.insert("mytool".to_string(), tool);
+
+        let err = p.validate().unwrap_err();
+        assert!(
+            err.contains("must be an absolute path"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_policy_validate_canonicalizes_path_parameter_allowed_entries() {
+        let mut p = make_valid_policy();
+        let tmp = tempfile::tempdir().unwrap();
+        let real_file = tmp.path().join("real_allowed");
+        let symlink_file = tmp.path().join("link_allowed");
+
+        std::fs::write(&real_file, "x").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.parameters.insert(
+            "--file".to_string(),
+            ParameterConfig::path().allowed(vec![symlink_file.to_string_lossy().into_owned()]),
+        );
+        p.tools.insert("mytool".to_string(), tool);
+
+        p.validate().unwrap();
+        let canonical = std::fs::canonicalize(&real_file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let cfg = p
+            .tools
+            .get("mytool")
+            .unwrap()
+            .parameters
+            .get("--file")
+            .unwrap();
+        assert_eq!(cfg.allowed.as_ref().unwrap(), &vec![canonical]);
+    }
+
+    #[test]
+    fn test_policy_validate_path_parameter_allowed_require_absolute() {
+        let mut p = make_valid_policy();
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.parameters.insert(
+            "--file".to_string(),
+            ParameterConfig::path().allowed(vec!["relative/path".to_string()]),
+        );
+        p.tools.insert("mytool".to_string(), tool);
+
+        let err = p.validate().unwrap_err();
+        assert!(
+            err.contains("must be an absolute path"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_policy_validate_compiles_parameter_regex_cache() {
+        let mut p = make_valid_policy();
+        let mut tool = make_tool("/usr/bin/tool");
+        tool.parameters.insert(
+            "--format".to_string(),
+            ParameterConfig::string().regex(r"^prod$".to_string()),
+        );
+        p.tools.insert("mytool".to_string(), tool);
+
+        p.validate().unwrap();
+        let cfg = p
+            .tools
+            .get("mytool")
+            .unwrap()
+            .parameters
+            .get("--format")
+            .unwrap();
+        assert!(cfg.compiled_regex.is_some());
+    }
+
+    #[test]
+    fn test_matches_allowed_or_regex_uses_cached_compiled_regex() {
+        let mut config = ParameterConfig::string().regex(r"^\d+$".to_string());
+        config.compiled_regex = Some(regex::Regex::new("^NOT_A_NUMBER$").unwrap());
+        assert!(!config.matches_allowed_or_regex("123"));
+    }
+
+    #[test]
+    fn test_parameter_config_matches_allowed_or_regex_semantics() {
+        let config = ParameterConfig::string()
+            .allowed(vec!["prod".to_string()])
+            .regex("^staging$".to_string());
+
+        assert!(config.matches_allowed_or_regex("prod"));
+        assert!(config.matches_allowed_or_regex("staging"));
+        assert!(!config.matches_allowed_or_regex("dev"));
     }
 }

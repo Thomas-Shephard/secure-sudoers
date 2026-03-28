@@ -84,7 +84,7 @@ fn test_policy_enforces_flag_rules() {
                 "parameters": {
                     "--action": {
                         "type": "string",
-                        "choices": ["start", "stop"]
+                        "allowed": ["start", "stop"]
                     }
                 }
             }

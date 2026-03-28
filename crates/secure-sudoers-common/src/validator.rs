@@ -180,7 +180,6 @@ pub fn validate_command(
             let p_params = helpers::PositionalParams {
                 tool_name,
                 context: &ValidationContext::DelimitedPositional,
-                disallowed: &tool.disallowed_positional_args,
                 safe_re: &safe_re,
                 config: &tool.positional,
                 blocked_paths: &policy.global_settings.blocked_paths,
@@ -206,7 +205,6 @@ pub fn validate_command(
             let p_params = helpers::PositionalParams {
                 tool_name,
                 context: &ValidationContext::Positional,
-                disallowed: &tool.disallowed_positional_args,
                 safe_re: &safe_re,
                 config: &tool.positional,
                 blocked_paths: &policy.global_settings.blocked_paths,
@@ -553,6 +551,390 @@ mod tests {
         let _ = std::fs::remove_file(&symlink_file);
         let _ = std::fs::remove_file(&real_file);
         let _ = std::fs::remove_file(&dummy_bin);
+    }
+
+    #[test]
+    fn test_disallowed_positional_path_matches_canonical_equivalent() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_disallowed_real");
+        let symlink_file = tmp.join("secure_sudoers_disallowed_symlink");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let cat_bin = std::fs::canonicalize("/bin/cat").unwrap_or_else(|_| "/usr/bin/cat".into());
+        let mut tool = make_tool(cat_bin.to_str().unwrap());
+        tool.positional = Some(ParameterConfig::path().disallowed(vec![
+            std::fs::canonicalize(&real_file)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ]));
+        p.tools.insert("cat".to_string(), tool);
+        p.validate().unwrap();
+
+        let result = validate_command(&p, "cat", args(&[symlink_file.to_str().unwrap()]));
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .reason
+                .contains("explicitly disallowed")
+        );
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
+    }
+
+    #[test]
+    fn test_disallowed_positional_path_canonicalizes_policy_entry() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_disallowed_real2");
+        let symlink_file = tmp.join("secure_sudoers_disallowed_symlink2");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let cat_bin = std::fs::canonicalize("/bin/cat").unwrap_or_else(|_| "/usr/bin/cat".into());
+        let mut tool = make_tool(cat_bin.to_str().unwrap());
+        tool.positional = Some(
+            ParameterConfig::path().disallowed(vec![symlink_file.to_string_lossy().into_owned()]),
+        );
+        p.tools.insert("cat".to_string(), tool);
+        p.validate().unwrap();
+
+        let result = validate_command(&p, "cat", args(&[real_file.to_str().unwrap()]));
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .reason
+                .contains("explicitly disallowed")
+        );
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
+    }
+
+    #[test]
+    fn test_validate_canonicalizes_positional_disallowed_for_path_tools() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_disallowed_real3");
+        let symlink_file = tmp.join("secure_sudoers_disallowed_symlink3");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let cat_bin = std::fs::canonicalize("/bin/cat").unwrap_or_else(|_| "/usr/bin/cat".into());
+        let mut tool = make_tool(cat_bin.to_str().unwrap());
+        tool.positional = Some(
+            ParameterConfig::path().disallowed(vec![symlink_file.to_string_lossy().into_owned()]),
+        );
+        p.tools.insert("cat".to_string(), tool);
+
+        p.validate().unwrap();
+        let canonical = std::fs::canonicalize(&real_file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            p.tools
+                .get("cat")
+                .unwrap()
+                .positional
+                .as_ref()
+                .and_then(|cfg| cfg.disallowed.clone())
+                .unwrap(),
+            vec![canonical],
+        );
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
+    }
+
+    #[test]
+    fn test_validate_keeps_positional_disallowed_entries_for_non_path_tools() {
+        let mut p = make_policy();
+        let cat_bin = std::fs::canonicalize("/bin/cat").unwrap_or_else(|_| "/usr/bin/cat".into());
+        let mut tool = make_tool(cat_bin.to_str().unwrap());
+        tool.positional =
+            Some(ParameterConfig::string().disallowed(vec!["/etc/shadow".to_string()]));
+        p.tools.insert("cat".to_string(), tool);
+
+        p.validate().unwrap();
+        assert_eq!(
+            p.tools
+                .get("cat")
+                .unwrap()
+                .positional
+                .as_ref()
+                .and_then(|cfg| cfg.disallowed.clone())
+                .unwrap(),
+            vec!["/etc/shadow".to_string()],
+        );
+    }
+
+    #[test]
+    fn test_disallowed_positional_path_denial_includes_resolved_path_for_non_sensitive() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_disallowed_real4");
+        let symlink_file = tmp.join("secure_sudoers_disallowed_symlink4");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let cat_bin = std::fs::canonicalize("/bin/cat").unwrap_or_else(|_| "/usr/bin/cat".into());
+        let mut tool = make_tool(cat_bin.to_str().unwrap());
+        tool.positional = Some(
+            ParameterConfig::path().disallowed(vec![real_file.to_string_lossy().into_owned()]),
+        );
+        p.tools.insert("cat".to_string(), tool);
+        p.validate().unwrap();
+
+        let err = validate_command(&p, "cat", args(&[symlink_file.to_str().unwrap()])).unwrap_err();
+        let canonical = std::fs::canonicalize(&real_file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(err.reason.contains("resolved to canonical path"));
+        assert!(err.reason.contains(&canonical));
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
+    }
+
+    #[test]
+    fn test_disallowed_flag_string_argument_rejected() {
+        let mut p = make_policy();
+        let mut tool = make_tool("/usr/bin/true");
+        tool.parameters.insert(
+            "--mode".into(),
+            ParameterConfig::string().disallowed(vec!["unsafe".to_string()]),
+        );
+        tool.positional = None;
+        p.tools.insert("cmd".to_string(), tool);
+
+        let err = validate_command(&p, "cmd", args(&["--mode", "unsafe"])).unwrap_err();
+        assert!(err.reason.contains("explicitly disallowed"));
+    }
+
+    #[test]
+    fn test_disallowed_overrides_allowed_for_string_flag_argument() {
+        let mut p = make_policy();
+        let mut tool = make_tool("/usr/bin/true");
+        tool.parameters.insert(
+            "--mode".into(),
+            ParameterConfig::string()
+                .allowed(vec!["unsafe".to_string()])
+                .disallowed(vec!["unsafe".to_string()]),
+        );
+        tool.positional = None;
+        p.tools.insert("cmd".to_string(), tool);
+
+        let err = validate_command(&p, "cmd", args(&["--mode", "unsafe"])).unwrap_err();
+        assert!(err.reason.contains("explicitly disallowed"));
+    }
+
+    #[test]
+    fn test_allowed_or_regex_semantics_for_string_flag_argument() {
+        let mut p = make_policy();
+        let mut tool = make_tool("/usr/bin/true");
+        tool.parameters.insert(
+            "--mode".into(),
+            ParameterConfig::string()
+                .allowed(vec!["prod".to_string()])
+                .regex("^staging$".to_string()),
+        );
+        tool.positional = None;
+        p.tools.insert("cmd".to_string(), tool);
+        p.validate().unwrap();
+
+        assert!(validate_command(&p, "cmd", args(&["--mode", "prod"])).is_ok());
+        assert!(validate_command(&p, "cmd", args(&["--mode", "staging"])).is_ok());
+        assert!(validate_command(&p, "cmd", args(&["--mode", "dev"])).is_err());
+    }
+
+    #[test]
+    fn test_path_flag_regex_uses_canonical_path() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_flag_regex_real");
+        let symlink_file = tmp.join("secure_sudoers_flag_regex_symlink");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let canonical = std::fs::canonicalize(&real_file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut tool = make_tool("/usr/bin/true");
+        tool.parameters.insert(
+            "--file".into(),
+            ParameterConfig::path().regex(format!("^{}$", regex::escape(&canonical))),
+        );
+        tool.positional = None;
+        p.tools.insert("cmd".to_string(), tool);
+        p.validate().unwrap();
+
+        let res = validate_command(&p, "cmd", args(&["--file", symlink_file.to_str().unwrap()]));
+        assert!(res.is_ok());
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
+    }
+
+    #[test]
+    fn test_string_flag_regex_uses_raw_value() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_string_flag_real");
+        let symlink_file = tmp.join("secure_sudoers_string_flag_symlink");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let symlink = symlink_file.to_string_lossy().into_owned();
+        let canonical = std::fs::canonicalize(&real_file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut tool = make_tool("/usr/bin/true");
+        tool.parameters.insert(
+            "--value".into(),
+            ParameterConfig::string().regex(format!("^{}$", regex::escape(&symlink))),
+        );
+        tool.positional = None;
+        p.tools.insert("cmd".to_string(), tool);
+        p.validate().unwrap();
+
+        let ok = validate_command(&p, "cmd", args(&["--value", symlink.as_str()]));
+        assert!(ok.is_ok());
+
+        let err = validate_command(&p, "cmd", args(&["--value", canonical.as_str()])).unwrap_err();
+        assert!(err.reason.contains("not permitted by policy"));
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
+    }
+
+    #[test]
+    fn test_disallowed_flag_path_argument_rejected_by_canonical_equivalence() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_disallowed_flag_real");
+        let symlink_file = tmp.join("secure_sudoers_disallowed_flag_symlink");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let mut tool = make_tool("/usr/bin/true");
+        tool.parameters.insert(
+            "--file".into(),
+            ParameterConfig::path().disallowed(vec![real_file.to_string_lossy().into_owned()]),
+        );
+        tool.positional = None;
+        p.tools.insert("cmd".to_string(), tool);
+        p.validate().unwrap();
+
+        let err = validate_command(&p, "cmd", args(&["--file", symlink_file.to_str().unwrap()]))
+            .unwrap_err();
+        assert!(err.reason.contains("explicitly disallowed"));
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
+    }
+
+    #[test]
+    fn test_sensitive_disallowed_positional_path_does_not_leak_canonical_path() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_disallowed_sensitive_real");
+        let symlink_file = tmp.join("secure_sudoers_disallowed_sensitive_symlink");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let cat_bin = std::fs::canonicalize("/bin/cat").unwrap_or_else(|_| "/usr/bin/cat".into());
+        let mut tool = make_tool(cat_bin.to_str().unwrap());
+        tool.positional = Some(
+            ParameterConfig::path()
+                .sensitive()
+                .disallowed(vec![real_file.to_string_lossy().into_owned()]),
+        );
+        p.tools.insert("cat".to_string(), tool);
+        p.validate().unwrap();
+
+        let err = validate_command(&p, "cat", args(&[symlink_file.to_str().unwrap()])).unwrap_err();
+        assert!(err.reason.contains("[REDACTED]"));
+        assert!(!err.reason.contains("resolved to canonical path"));
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
+    }
+
+    #[test]
+    fn test_disallowed_overrides_allowed_for_path_positional_argument() {
+        let mut p = make_policy();
+        let tmp = std::env::temp_dir();
+        let real_file = tmp.join("secure_sudoers_disallowed_wins_real");
+        let symlink_file = tmp.join("secure_sudoers_disallowed_wins_symlink");
+
+        let _ = std::fs::remove_file(&real_file);
+        let _ = std::fs::remove_file(&symlink_file);
+
+        std::fs::write(&real_file, "test").unwrap();
+        std::os::unix::fs::symlink(&real_file, &symlink_file).unwrap();
+
+        let canonical = std::fs::canonicalize(&real_file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let cat_bin = std::fs::canonicalize("/bin/cat").unwrap_or_else(|_| "/usr/bin/cat".into());
+        let mut tool = make_tool(cat_bin.to_str().unwrap());
+        tool.positional = Some(
+            ParameterConfig::path()
+                .allowed(vec![canonical.clone()])
+                .disallowed(vec![canonical]),
+        );
+        p.tools.insert("cat".to_string(), tool);
+        p.validate().unwrap();
+
+        let err = validate_command(&p, "cat", args(&[symlink_file.to_str().unwrap()])).unwrap_err();
+        assert!(err.reason.contains("explicitly disallowed"));
+
+        let _ = std::fs::remove_file(&symlink_file);
+        let _ = std::fs::remove_file(&real_file);
     }
 }
 

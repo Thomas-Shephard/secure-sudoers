@@ -670,7 +670,9 @@ mod tests {
                     param_type: ParameterType::String,
                     sensitive: true,
                     regex: None,
-                    choices: None,
+                    compiled_regex: None,
+                    allowed: None,
+                    disallowed: None,
                     help: None,
                 },
             );

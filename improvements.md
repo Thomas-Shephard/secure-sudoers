@@ -8,12 +8,6 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 11. Disallowed positional argument matching is raw-string exact
-1. **Location:** `crates/secure-sudoers-common/src/validator/helpers.rs::push_positional`
-2. **Issue:** `disallowed_positional_args` is checked against raw argument strings without normalization/canonical equivalence.
-3. **Impact:** Policy intent may be bypassed through semantically equivalent argument variants.
-4. **Suggested Direction:** Normalize/canonicalize before disallowed comparisons when policy semantics require equivalence.
-
 ### 12. Installer and unlock robustness around signed policy lifecycle
 1. **Location:** `crates/secure-sudoers-utils/src/modules/installer.rs` (`install_with_paths`, `unlock_with_paths`)
 2. **Issue:** `install` validates JSON but does not verify signature; `unlock` depends on readable/parseable policy.

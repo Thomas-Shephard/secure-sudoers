@@ -27,19 +27,26 @@ Each tool is an entry in the `tools` map.
 | `help_description`           | String        | Human-readable description of the tool. **Required**.                                                                 |
 | `isolation`                  | Object        | Namespace sandboxing settings (see [Isolation](#isolation-sandboxing)).                                               |
 | `env_whitelist`              | Array<String> | Additional environment variables allowed for this tool (merged with `common_env_whitelist`).                          |
-| `disallowed_positional_args` | Array<String> | List of specific strings that are never allowed as positional arguments (e.g., `["-exec", "--interactive"]`).         |
 
 ### Parameters
 The `parameters` map defines allowed flags and their validation rules.
 
-| Field       | Type          | Description                                          |
-|-------------|---------------|:-----------------------------------------------------|
-| `type`      | Enum          | `bool`, `string`, or `path`. **Required**.           |
-| `sensitive` | Boolean       | Masks the argument value in logs with `[REDACTED]`.  |
-| `regex`     | String        | Pattern the argument must match.                     |
-| `choices`   | Array<String> | Set of allowed values (exact match).                 |
+| Field        | Type          | Description                                               |
+|--------------|---------------|-----------------------------------------------------------|
+| `type`       | Enum          | `bool`, `string`, or `path`. **Required**.                |
+| `sensitive`  | Boolean       | Masks the argument value in logs with `[REDACTED]`.       |
+| `regex`      | String        | Pattern the argument must match.                          |
+| `allowed`    | Array<String> | Explicit allow-list for this parameter/positional config. |
+| `disallowed` | Array<String> | Explicit deny-list for this parameter/positional config.  |
 
 For the `path` type, Secure Sudoers resolves symlinks and canonicalizes the path *before* applying regex or checking blocked lists.
+For `type: "path"`, `allowed` and `disallowed` entries must be absolute paths and are canonicalized during policy validation.
+
+Semantics and precedence:
+- If both `allowed` and `regex` are omitted, values are allowed by default (subject to type-specific checks and blocked-path enforcement).
+- If `disallowed` is set, matching values are always denied.
+- If both are set, denial takes precedence over allow-list membership.
+- If both `allowed` and `regex` are present, either constraint may allow the value.
 
 ### Positional Arguments
 The `positional` block defines rules for arguments not associated with a flag.
@@ -48,7 +55,7 @@ The `positional` block defines rules for arguments not associated with a flag.
 
 This block should be defined if you need:
 - **Path Security**: Set `type: "path"` to ensure positional arguments are canonicalized and checked against `blocked_paths`.
-- **Strict Validation**: Use `choices` or `regex` to limit what values can be passed (e.g., specific sub-commands).
+- **Strict Validation**: Use `allowed` or `regex` to limit what values can be passed (e.g., specific sub-commands).
 - **Redaction**: Use `sensitive: true` to mask the value in logs.
 
 ### Isolation (Sandboxing)
@@ -94,7 +101,16 @@ This allows audit queries like `grep '"rule_id":"apt-install-v2"'` to work consi
       "verbs": ["install", "update"],
       "parameters": {
         "-y": { "type": "bool" },
-        "--config": { "type": "path", "regex": "^/etc/apt/.*" }
+        "--config": {
+          "type": "path",
+          "regex": "^/etc/apt/.*",
+          "allowed": ["/etc/apt/apt.conf"],
+          "disallowed": ["/etc/apt/forbidden.conf"]
+        }
+      },
+      "positional": {
+        "type": "path",
+        "disallowed": ["/etc/shadow"]
       },
       "isolation": {
         "unshare_network": false,
