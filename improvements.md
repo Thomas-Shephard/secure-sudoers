@@ -8,12 +8,6 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 10. Coarse `..` path precheck may over/under-constrain semantics
-1. **Location:** `crates/secure-sudoers-common/src/fs.rs::check_path`
-2. **Issue:** Early `arg.contains("..")` check is string-based and coarse before component-level processing.
-3. **Impact:** Can produce avoidable false denials and duplicate traversal logic complexity.
-4. **Suggested Direction:** Rely on component-wise canonical traversal rules and explicit `ParentDir` handling only.
-
 ### 11. Disallowed positional argument matching is raw-string exact
 1. **Location:** `crates/secure-sudoers-common/src/validator/helpers.rs::push_positional`
 2. **Issue:** `disallowed_positional_args` is checked against raw argument strings without normalization/canonical equivalence.

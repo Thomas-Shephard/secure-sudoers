@@ -6,16 +6,9 @@ const MAX_SYMLINK_DEPTH: u32 = 32;
 
 pub fn check_path(
     arg: &str,
-    context: &ValidationContext,
+    _context: &ValidationContext,
     blocked_paths: &[String],
 ) -> Result<SecurePath, String> {
-    if arg.contains("..") {
-        return Err(format!(
-            "Path traversal detected in argument '{}' for '{}'",
-            arg, context
-        ));
-    }
-
     let path = Path::new(arg);
     if !path.is_absolute() {
         return Err(format!("Security failure: path must be absolute: {}", arg));
@@ -216,5 +209,45 @@ mod tests {
         let result = check_path(target.to_str().unwrap(), &context, &blocked_paths);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_path_allows_component_names_with_double_dots() {
+        let dir = tempdir().unwrap();
+        let base_path = dir.path();
+        let safe_dir = base_path.join("safe..name");
+        std::fs::create_dir(&safe_dir).unwrap();
+        let safe_file = safe_dir.join("payload.txt");
+        std::fs::write(&safe_file, b"ok").unwrap();
+
+        let context = ValidationContext::Positional;
+        let result = check_path(safe_file.to_str().unwrap(), &context, &[]);
+
+        assert!(
+            result.is_ok(),
+            "Expected non-traversal component name to be allowed, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_check_path_allows_safe_parent_dir_component_canonicalization() {
+        let dir = tempdir().unwrap();
+        let base_path = dir.path();
+        let public_dir = base_path.join("public");
+        std::fs::create_dir(&public_dir).unwrap();
+        let payload = public_dir.join("payload.txt");
+        std::fs::write(&payload, b"ok").unwrap();
+
+        let parent_relative = public_dir.join("..").join("public").join("payload.txt");
+        let expected = std::fs::canonicalize(&parent_relative)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let context = ValidationContext::Positional;
+        let secure = check_path(parent_relative.to_str().unwrap(), &context, &[]).unwrap();
+
+        assert_eq!(secure.path, expected);
     }
 }
