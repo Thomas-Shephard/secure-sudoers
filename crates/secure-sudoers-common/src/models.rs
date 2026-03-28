@@ -218,9 +218,6 @@ fn default_blocked_paths() -> Vec<String> {
         "/proc/kcore".to_string(),
     ]
 }
-fn default_bypass_groups() -> Vec<String> {
-    vec!["sudo".to_string(), "wheel".to_string()]
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -244,12 +241,8 @@ pub struct GlobalSettings {
     pub safe_arg_regex: String,
     #[serde(default = "default_common_env_whitelist")]
     pub common_env_whitelist: Vec<String>,
-    #[serde(default)]
-    pub dry_run: bool,
     #[serde(default = "default_blocked_paths")]
     pub blocked_paths: Vec<String>,
-    #[serde(default = "default_bypass_groups")]
-    pub bypass_groups: Vec<String>,
     #[serde(default)]
     pub unauthorized_audit_mode: UnauthorizedAuditMode,
     pub default_isolation: Option<IsolationSettings>,

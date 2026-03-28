@@ -257,9 +257,7 @@ mod tests {
             admin_contact: "admin@example.com".to_string(),
             safe_arg_regex: r"^[a-zA-Z0-9._+\-=:,@/]+$".to_string(),
             common_env_whitelist: vec![],
-            dry_run: false,
             blocked_paths: vec![],
-            bypass_groups: vec![],
             unauthorized_audit_mode: UnauthorizedAuditMode::Minimal,
             default_isolation: None,
         }

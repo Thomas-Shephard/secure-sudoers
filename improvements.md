@@ -8,12 +8,6 @@ Baseline status at audit time:
 
 ## 1) Functional Audit Findings
 
-### 9. Policy knobs appear unused at runtime
-1. **Location:** `crates/secure-sudoers-common/src/models.rs` (`bypass_groups`, `dry_run`) vs runtime crates
-2. **Issue:** These fields are present in policy model but not exercised in execution flow.
-3. **Impact:** Configuration drift and false sense of security controls.
-4. **Suggested Direction:** Either implement semantics end-to-end or remove/deprecate/document as unsupported.
-
 ### 10. Coarse `..` path precheck may over/under-constrain semantics
 1. **Location:** `crates/secure-sudoers-common/src/fs.rs::check_path`
 2. **Issue:** Early `arg.contains("..")` check is string-based and coarse before component-level processing.
