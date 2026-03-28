@@ -39,9 +39,3 @@ Baseline status at audit time:
 2. **Issue:** No focused unit/integration tests for update success/failure matrix (downgrade, oversize body, bad sig, atomic replacement behavior).
 3. **Impact:** Elevated regression risk in a security-sensitive update mechanism.
 4. **Suggested Direction:** Add module-level tests with local HTTP fixtures and explicit rollback/assertion checks.
-
-### 17. Security-critical tests can silently skip when non-root
-1. **Location:** `crates/secure-sudoers/src/testing.rs::require_root!` and root-gated tests in isolation/supervisor paths
-2. **Issue:** Tests are skipped rather than failed when privileges are missing.
-3. **Impact:** CI may provide optimistic signal without exercising key isolation logic.
-4. **Suggested Direction:** Enforce a privileged CI lane (containerized/root-capable) as a required gate.

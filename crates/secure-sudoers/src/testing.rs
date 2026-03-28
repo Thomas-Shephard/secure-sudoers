@@ -2,8 +2,15 @@
 macro_rules! require_root {
     () => {
         if unsafe { libc::getuid() } != 0 {
-            eprintln!("  [SKIP] test requires root");
-            return;
+            if std::env::var("SECURE_SUDOERS_REQUIRE_ROOT").is_ok() {
+                panic!(
+                    "test requires root privileges but is running as UID {}",
+                    unsafe { libc::getuid() }
+                );
+            } else {
+                eprintln!("  [SKIP] test requires root");
+                return;
+            }
         }
     };
 }
