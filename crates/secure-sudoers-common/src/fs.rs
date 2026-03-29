@@ -1,4 +1,5 @@
 use crate::models::{SecurePath, ValidationContext};
+use crate::error::Error;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Component, Path, PathBuf};
 
@@ -8,10 +9,13 @@ pub fn check_path(
     arg: &str,
     _context: &ValidationContext,
     blocked_paths: &[String],
-) -> Result<SecurePath, String> {
+) -> Result<SecurePath, Error> {
     let path = Path::new(arg);
     if !path.is_absolute() {
-        return Err(format!("Security failure: path must be absolute: {}", arg));
+        return Err(Error::Security(format!(
+            "Security failure: path must be absolute: {}",
+            arg
+        )));
     }
 
     let mut symlink_count = 0;
@@ -22,7 +26,7 @@ fn resolve_securely(
     path: &Path,
     blocked_paths: &[String],
     symlink_count: &mut u32,
-) -> Result<SecurePath, String> {
+) -> Result<SecurePath, Error> {
     let mut current_fd = open_root()?;
     let mut current_canonical = PathBuf::from("/");
 
@@ -30,12 +34,13 @@ fn resolve_securely(
 
     for (i, comp) in components.iter().enumerate() {
         let (comp_str, is_normal) = match comp {
-            Component::Normal(s) => (s.to_str().ok_or("Invalid path component")?, true),
+            Component::Normal(s) => (s.to_str().ok_or_else(|| Error::Validation("Invalid path component".to_string()))?, true),
             Component::ParentDir => ("..", false),
             Component::CurDir => continue,
             _ => continue,
         };
-        let c_comp = std::ffi::CString::new(comp_str).map_err(|_| "Nul byte in component")?;
+        let c_comp = std::ffi::CString::new(comp_str)
+            .map_err(|_| Error::System("Nul byte in component".into()))?;
 
         let fd_raw = unsafe {
             libc::openat(
@@ -55,7 +60,7 @@ fn resolve_securely(
 
                     *symlink_count += 1;
                     if *symlink_count > MAX_SYMLINK_DEPTH {
-                        return Err("Security failure: too many symlinks".to_string());
+                        return Err(Error::Security("Security failure: too many symlinks".to_string()));
                     }
 
                     let link_target = read_link_at(current_fd.as_raw_fd(), &c_comp)?;
@@ -80,21 +85,18 @@ fn resolve_securely(
             current_fd = unsafe { OwnedFd::from_raw_fd(fd_raw) };
             check_blocked(&current_canonical.to_string_lossy(), blocked_paths)?;
         } else {
-            let err = std::io::Error::last_os_error();
-            return Err(format!(
-                "Security failure: cannot open component '{}' of '{}': {}",
-                comp_str,
-                path.display(),
-                err
+            return Err(Error::IoContext(
+                format!("Security failure: cannot open component '{}' of '{}'", comp_str, path.display()),
+                std::io::Error::last_os_error(),
             ));
         }
     }
 
     let proc_fd_path = format!("/proc/self/fd/{}", current_fd.as_raw_fd());
     let canonical_path = std::fs::read_link(&proc_fd_path).map_err(|e| {
-        format!(
-            "Security failure: cannot read magic symlink '{}' to get canonical path: {}",
-            proc_fd_path, e
+        Error::IoContext(
+            format!("Security failure: cannot read magic symlink '{}' to get canonical path", proc_fd_path),
+            e
         )
     })?;
 
@@ -104,8 +106,8 @@ fn resolve_securely(
     })
 }
 
-fn open_root() -> Result<OwnedFd, String> {
-    let c_root = std::ffi::CString::new("/").unwrap();
+fn open_root() -> Result<OwnedFd, Error> {
+    let c_root = std::ffi::CString::new("/").map_err(|_| Error::System("Nul byte in root path".into()))?;
     let fd = unsafe {
         libc::open(
             c_root.as_ptr(),
@@ -113,15 +115,15 @@ fn open_root() -> Result<OwnedFd, String> {
         )
     };
     if fd < 0 {
-        return Err(format!(
-            "Cannot open root: {}",
-            std::io::Error::last_os_error()
+        return Err(Error::IoContext(
+            "Cannot open root".to_string(),
+            std::io::Error::last_os_error(),
         ));
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn read_link_at(dir_fd: i32, c_name: &std::ffi::CStr) -> Result<String, String> {
+fn read_link_at(dir_fd: i32, c_name: &std::ffi::CStr) -> Result<String, Error> {
     let mut buf = vec![0u8; libc::PATH_MAX as usize];
     let n = unsafe {
         libc::readlinkat(
@@ -132,21 +134,24 @@ fn read_link_at(dir_fd: i32, c_name: &std::ffi::CStr) -> Result<String, String> 
         )
     };
     if n < 0 {
-        return Err(format!(
-            "readlinkat failed: {}",
-            std::io::Error::last_os_error()
+        return Err(Error::IoContext(
+            "readlinkat failed".to_string(),
+            std::io::Error::last_os_error(),
         ));
     }
-    let s = std::str::from_utf8(&buf[..n as usize]).map_err(|_| "Invalid UTF-8 in symlink")?;
+    let s = std::str::from_utf8(&buf[..n as usize]).map_err(|_| Error::Parse("Invalid UTF-8 in symlink".into()))?;
     Ok(s.to_string())
 }
 
-fn check_blocked(path: &str, blocked_paths: &[String]) -> Result<(), String> {
+fn check_blocked(path: &str, blocked_paths: &[String]) -> Result<(), Error> {
     for blocked in blocked_paths {
         let bp = Path::new(blocked);
         let cp = Path::new(path);
         if cp == bp || cp.starts_with(bp) {
-            return Err(format!("Access to blocked path '{}' is denied", path));
+            return Err(Error::Validation(format!(
+                "Access to blocked path '{}' is denied",
+                path
+            )));
         }
     }
     Ok(())
@@ -184,7 +189,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            result.as_ref().unwrap_err().contains("denied"),
+            result.as_ref().unwrap_err().to_string().contains("denied"),
             "Expected denial error, got {:?}",
             result
         );

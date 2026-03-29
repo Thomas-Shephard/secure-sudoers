@@ -4,6 +4,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 #[cfg(feature = "network-update")]
 use secure_sudoers_utils::modules::network;
 use secure_sudoers_utils::modules::{installer, keys};
+use secure_sudoers_common::error::Error;
 
 #[derive(Parser)]
 #[command(
@@ -68,12 +69,12 @@ fn main() {
     }
 }
 
-fn cmd_check(policy_path: &str) -> Result<(), String> {
+fn cmd_check(policy_path: &str) -> Result<(), Error> {
     let content = std::fs::read_to_string(policy_path)
-        .map_err(|e| format!("Cannot read {policy_path}: {e}"))?;
+        .map_err(|e| Error::IoContext(format!("Cannot read {policy_path}"), e))?;
 
     let mut policy: secure_sudoers_common::models::SecureSudoersPolicy =
-        serde_json::from_str(&content).map_err(|e| format!("Failed to parse policy JSON: {e}"))?;
+        serde_json::from_str(&content).map_err(|e| Error::Parse(format!("Failed to parse policy JSON: {e}")))?;
 
     let issues = policy.lint();
     if issues.is_empty() {
@@ -84,30 +85,32 @@ fn cmd_check(policy_path: &str) -> Result<(), String> {
         for issue in issues {
             eprintln!("  - {issue}");
         }
-        Err("Policy check failed".to_string())
+        Err(Error::Validation(
+            "Policy check failed".to_string(),
+        ))
     }
 }
 
-fn cmd_sign(policy_path: &str, key_path: &str) -> Result<(), String> {
+fn cmd_sign(policy_path: &str, key_path: &str) -> Result<(), Error> {
     let signing_key = keys::load_signing_key(key_path)?;
     let policy_bytes =
-        std::fs::read(policy_path).map_err(|e| format!("Cannot read {policy_path}: {e}"))?;
+        std::fs::read(policy_path).map_err(|e| Error::IoContext(format!("Cannot read {policy_path}"), e))?;
     let signature = ed25519_dalek::Signer::sign(&signing_key, &policy_bytes);
     let sig_path = format!("{policy_path}.sig");
     std::fs::write(&sig_path, signature.to_bytes())
-        .map_err(|e| format!("Failed to write {sig_path}: {e}"))?;
+        .map_err(|e| Error::IoContext(format!("Failed to write {sig_path}"), e))?;
     println!("Signed {policy_path} → {sig_path}");
     Ok(())
 }
 
-fn cmd_generate_man_page() -> Result<(), String> {
+fn cmd_generate_man_page() -> Result<(), Error> {
     let cmd = Cli::command();
     let man = clap_mangen::Man::new(cmd);
     let mut buffer: Vec<u8> = Default::default();
     man.render(&mut buffer)
-        .map_err(|e| format!("Failed to render man page: {e}"))?;
+        .map_err(|e| Error::IoContext("Failed to render man page".to_string(), e))?;
     std::io::Write::write_all(&mut std::io::stdout(), &buffer)
-        .map_err(|e| format!("Failed to write to stdout: {e}"))?;
+        .map_err(|e| Error::IoContext("Failed to write to stdout".to_string(), e))?;
     Ok(())
 }
 

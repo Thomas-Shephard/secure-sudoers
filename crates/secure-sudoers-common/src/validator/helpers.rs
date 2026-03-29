@@ -17,7 +17,7 @@ pub fn process_long_flag(
     params: &ValidationParams<'_>,
     iter: &mut Peekable<IntoIter<String>>,
     out: &mut Vec<ValidatedArg>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     process_any_flag(&flag, params, iter, out)
 }
 
@@ -26,7 +26,7 @@ pub fn process_short_flag(
     params: &ValidationParams<'_>,
     iter: &mut Peekable<IntoIter<String>>,
     out: &mut Vec<ValidatedArg>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     if process_flag_with_value(&arg, None, params, iter, out)? {
         return Ok(());
     }
@@ -48,10 +48,10 @@ pub fn process_short_flag(
             out.push(ValidatedArg::String(s));
         } else {
             let display_flag = sanitize_unknown_flag_for_error(&s);
-            return Err(format!(
+            return Err(crate::error::Error::Validation(format!(
                 "Flag '{}' is not permitted for tool '{}'",
                 display_flag, params.tool_name
-            ));
+            )));
         }
     }
     Ok(())
@@ -62,13 +62,13 @@ fn process_any_flag(
     params: &ValidationParams<'_>,
     iter: &mut Peekable<IntoIter<String>>,
     out: &mut Vec<ValidatedArg>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     if !process_flag_with_value(flag, None, params, iter, out)? {
         let display_flag = sanitize_unknown_flag_for_error(flag);
-        return Err(format!(
+        return Err(crate::error::Error::Validation(format!(
             "Flag '{}' is not permitted for tool '{}'",
             display_flag, params.tool_name
-        ));
+        )));
     }
     Ok(())
 }
@@ -93,12 +93,13 @@ fn take_flag_value(
     flag_name: &str,
     provided_value: &mut Option<String>,
     iter: &mut Peekable<IntoIter<String>>,
-) -> Result<String, String> {
+) -> Result<String, crate::error::Error> {
     if let Some(value) = provided_value.take() {
         return Ok(value);
     }
-    iter.next()
-        .ok_or_else(|| format!("Flag '{}' requires an argument", flag_name))
+    iter.next().ok_or_else(|| {
+        crate::error::Error::System(format!("Flag '{}' requires an argument", flag_name))
+    })
 }
 
 fn push_string_flag_value(
@@ -107,21 +108,21 @@ fn push_string_flag_value(
     config: &ParameterConfig,
     params: &ValidationParams<'_>,
     out: &mut Vec<ValidatedArg>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     let display_val = if config.sensitive { "[REDACTED]" } else { &val };
 
     if config.is_explicitly_disallowed(&val) {
-        return Err(format!(
+        return Err(crate::error::Error::Validation(format!(
             "Flag '{}' argument '{}' is explicitly disallowed for tool '{}'",
             flag_name, display_val, params.tool_name
-        ));
+        )));
     }
 
     if !config.matches_allowed_or_regex(&val) {
-        return Err(format!(
+        return Err(crate::error::Error::Validation(format!(
             "Flag '{}' argument '{}' is not permitted by policy",
             flag_name, display_val
-        ));
+        )));
     }
 
     out.push(ValidatedArg::String(flag_name.to_string()));
@@ -135,7 +136,7 @@ fn push_path_flag_value(
     config: &ParameterConfig,
     params: &ValidationParams<'_>,
     out: &mut Vec<ValidatedArg>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     let secure_path = validate_path_value(
         &val,
         config,
@@ -180,25 +181,31 @@ fn validate_path_value<FDisallowed, FPolicy>(
     blocked_paths: &[String],
     disallowed_msg: FDisallowed,
     policy_msg: FPolicy,
-) -> Result<crate::models::SecurePath, String>
+) -> Result<crate::models::SecurePath, crate::error::Error>
 where
     FDisallowed: Fn(&str, bool) -> String,
     FPolicy: Fn(&str, bool) -> String,
 {
     let secure_path = check_path(raw_value, context, blocked_paths).map_err(|e| {
-        if config.sensitive {
+        crate::error::Error::Validation(if config.sensitive {
             "Access to a sensitive path was denied".to_string()
         } else {
-            e
-        }
+            e.to_string()
+        })
     })?;
 
     if config.is_explicitly_disallowed(&secure_path.path) {
-        return Err(disallowed_msg(&secure_path.path, config.sensitive));
+        return Err(crate::error::Error::Validation(disallowed_msg(
+            &secure_path.path,
+            config.sensitive,
+        )));
     }
 
     if !config.matches_allowed_or_regex(&secure_path.path) {
-        return Err(policy_msg(&secure_path.path, config.sensitive));
+        return Err(crate::error::Error::Config(policy_msg(
+            &secure_path.path,
+            config.sensitive,
+        )));
     }
 
     Ok(secure_path)
@@ -210,7 +217,7 @@ fn process_flag_with_value(
     params: &ValidationParams<'_>,
     iter: &mut Peekable<IntoIter<String>>,
     out: &mut Vec<ValidatedArg>,
-) -> Result<bool, String> {
+) -> Result<bool, crate::error::Error> {
     let (flag_name, provided_value) = if let Some(val) = attached_value {
         (flag, Some(val))
     } else {
@@ -224,7 +231,10 @@ fn process_flag_with_value(
         match config.param_type {
             ParameterType::Bool => {
                 if provided_value.is_some() {
-                    return Err(format!("Flag '{}' does not take an argument", flag_name));
+                    return Err(crate::error::Error::System(format!(
+                        "Flag '{}' does not take an argument",
+                        flag_name
+                    )));
                 }
                 out.push(ValidatedArg::String(flag_name.to_string()));
                 Ok(true)
@@ -259,7 +269,7 @@ pub fn push_positional(
     arg: String,
     params: &PositionalParams<'_>,
     out: &mut Vec<ValidatedArg>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     let is_path = params
         .config
         .as_ref()
@@ -267,10 +277,10 @@ pub fn push_positional(
     let is_sensitive = params.config.as_ref().is_some_and(|c| c.sensitive);
     let display_arg = if is_sensitive { "[REDACTED]" } else { &arg };
     if !params.safe_re.is_match(&arg) {
-        return Err(format!(
+        return Err(crate::error::Error::System(format!(
             "Positional argument '{}' contains illegal characters",
             display_arg
-        ));
+        )));
     }
 
     if is_path {
@@ -307,24 +317,24 @@ pub fn push_positional(
 
     if let Some(config) = params.config {
         if config.is_explicitly_disallowed(&arg) {
-            return Err(format!(
+            return Err(crate::error::Error::Validation(format!(
                 "Positional argument '{}' is explicitly disallowed for tool '{}'",
                 display_arg, params.tool_name
-            ));
+            )));
         }
         if !config.matches_allowed_or_regex(&arg) {
-            return Err(format!(
+            return Err(crate::error::Error::Validation(format!(
                 "Positional argument '{}' is not permitted by policy",
                 display_arg
-            ));
+            )));
         }
     }
 
     if arg.starts_with('-') && arg.len() > 1 {
-        return Err(format!(
+        return Err(crate::error::Error::Security(format!(
             "Security failure: illegal flag-like positional argument '{}' in '{}' context",
             arg, params.context
-        ));
+        )));
     }
     out.push(ValidatedArg::String(arg));
     Ok(())

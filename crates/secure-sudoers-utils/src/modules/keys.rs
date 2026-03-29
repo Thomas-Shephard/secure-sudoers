@@ -1,10 +1,11 @@
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand_core::OsRng;
+use secure_sudoers_common::error::Error;
 
 pub const PRIVATE_KEY_FILE: &str = "secure_sudoers_private_key.pem";
 pub const PUBLIC_KEY_FILE: &str = "secure_sudoers_public_key.pem";
 
-pub fn cmd_gen_keys() -> Result<(), String> {
+pub fn cmd_gen_keys() -> Result<(), Error> {
     let signing_key = SigningKey::generate(&mut OsRng);
     let verifying_key = signing_key.verifying_key();
 
@@ -27,7 +28,7 @@ pub fn cmd_gen_keys() -> Result<(), String> {
     Ok(())
 }
 
-pub fn write_key_file(path: &str, label: &str, bytes: &[u8], unix_mode: u32) -> Result<(), String> {
+pub fn write_key_file(path: &str, label: &str, bytes: &[u8], unix_mode: u32) -> Result<(), Error> {
     let content = format!(
         "-----BEGIN {label}-----\n{b64}\n-----END {label}-----\n",
         b64 = secure_sudoers_common::util::bytes_to_base64(bytes)
@@ -41,29 +42,32 @@ pub fn write_key_file(path: &str, label: &str, bytes: &[u8], unix_mode: u32) -> 
         .mode(unix_mode)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .map_err(|e| format!("Failed to create {path}: {e}"))?;
+        .map_err(|e| Error::IoContext(format!("Failed to create {path}"), e))?;
+
     let perms = std::fs::Permissions::from_mode(unix_mode);
     f.set_permissions(perms)
-        .map_err(|e| format!("Failed to set permissions on {path}: {e}"))?;
+        .map_err(|e| Error::IoContext(format!("Failed to set permissions on {path}"), e))?;
+
     f.write_all(content.as_bytes())
-        .map_err(|e| format!("Failed to write {path}: {e}"))?;
+        .map_err(|e| Error::IoContext(format!("Failed to write {path}"), e))?;
+
     Ok(())
 }
 
-pub fn load_signing_key(path: &str) -> Result<SigningKey, String> {
+pub fn load_signing_key(path: &str) -> Result<SigningKey, Error> {
     let bytes = secure_sudoers_common::util::read_pem_bytes(path, "SECURE SUDOERS PRIVATE KEY")?;
     let arr: [u8; 32] = bytes
         .as_slice()
         .try_into()
-        .map_err(|_| format!("Private key must be 32 bytes (got {})", bytes.len()))?;
+        .map_err(|_| Error::Validation(format!("Private key must be 32 bytes (got {})", bytes.len())))?;
     Ok(SigningKey::from_bytes(&arr))
 }
 
-pub fn load_verifying_key(path: &str) -> Result<VerifyingKey, String> {
+pub fn load_verifying_key(path: &str) -> Result<VerifyingKey, Error> {
     let bytes = secure_sudoers_common::util::read_pem_bytes(path, "SECURE SUDOERS PUBLIC KEY")?;
     let arr: [u8; 32] = bytes
         .as_slice()
         .try_into()
-        .map_err(|_| format!("Public key must be 32 bytes (got {})", bytes.len()))?;
-    VerifyingKey::from_bytes(&arr).map_err(|e| format!("Invalid public key in {path}: {e}"))
+        .map_err(|_| Error::Validation(format!("Public key must be 32 bytes (got {})", bytes.len())))?;
+    VerifyingKey::from_bytes(&arr).map_err(|e| Error::Validation(format!("Invalid public key in {path}: {e}")))
 }

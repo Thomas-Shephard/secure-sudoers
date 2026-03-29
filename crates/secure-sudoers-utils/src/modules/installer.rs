@@ -1,4 +1,5 @@
 use secure_sudoers_common::models::SecureSudoersPolicy;
+use secure_sudoers_common::error::Error;
 
 pub const INSTALL_POLICY_PATH: &str = "/etc/secure-sudoers/policy.json";
 pub const INSTALL_BINARY: &str = "/usr/local/bin/secure-sudoers";
@@ -27,11 +28,11 @@ impl Default for InstallPaths<'static> {
     }
 }
 
-pub fn cmd_install() -> Result<(), String> {
+pub fn cmd_install() -> Result<(), Error> {
     install_with_paths(&InstallPaths::default())
 }
 
-pub fn cmd_unlock() -> Result<(), String> {
+pub fn cmd_unlock() -> Result<(), Error> {
     unlock_with_paths(&InstallPaths::default())
 }
 
@@ -57,16 +58,14 @@ fn generate_sudoers_content_with_dir(tools: &[String], symlink_dir: &str) -> Str
     )
 }
 
-fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("Cannot read {path}: {e}"))?;
-    serde_json::from_str(&src).map_err(|e| format!("Invalid policy JSON at {path}: {e}"))
+fn load_policy(path: &str) -> Result<SecureSudoersPolicy, Error> {
+    let src = std::fs::read_to_string(path).map_err(|e| Error::IoContext(format!("Cannot read {path}"), e))?;
+    serde_json::from_str(&src).map_err(|e| Error::System(format!("Invalid policy JSON at {path}: {e}")))
 }
 
-pub fn install_with_paths(paths: &InstallPaths<'_>) -> Result<(), String> {
+pub fn install_with_paths(paths: &InstallPaths<'_>) -> Result<(), Error> {
     let mut policy = load_policy(paths.policy_path)?;
-    policy
-        .validate()
-        .map_err(|e| format!("Policy validation failed: {e}"))?;
+    policy.validate()?;
 
     let mut tool_names: Vec<String> = policy.tools.keys().cloned().collect();
     tool_names.sort_unstable();
@@ -94,15 +93,15 @@ pub fn install_with_paths(paths: &InstallPaths<'_>) -> Result<(), String> {
 
     println!("Installation complete.");
     if !symlink_errors.is_empty() {
-        return Err(format!(
+        return Err(Error::System(format!(
             "Installation completed with symlink errors:\n{}",
             symlink_errors.join("\n")
-        ));
+        )));
     }
     Ok(())
 }
 
-pub fn unlock_with_paths(paths: &InstallPaths<'_>) -> Result<(), String> {
+pub fn unlock_with_paths(paths: &InstallPaths<'_>) -> Result<(), Error> {
     let mut policy = load_policy(paths.policy_path)?;
     let _ = policy.validate();
 
@@ -126,10 +125,10 @@ pub fn unlock_with_paths(paths: &InstallPaths<'_>) -> Result<(), String> {
     }
     println!("Unlocked {} managed file(s).", refs.len());
     if !errors.is_empty() {
-        return Err(format!(
+        return Err(Error::System(format!(
             "Some files could not be unlocked:\n{}",
             errors.join("\n")
-        ));
+        )));
     }
     Ok(())
 }
@@ -202,7 +201,7 @@ fn write_sudoers_file_to(
     tools: &[String],
     sudoers_path: &str,
     symlink_dir: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -239,9 +238,7 @@ fn write_sudoers_file_to(
 
     let content = generate_sudoers_content_with_dir(tools, symlink_dir);
     let sudoers = std::path::Path::new(sudoers_path);
-    let sudoers_file_name = sudoers.file_name().ok_or_else(|| {
-        format!("Invalid sudoers destination path {sudoers_path}: missing file name")
-    })?;
+    let sudoers_file_name = sudoers.file_name().ok_or_else(|| Error::System(format!("Invalid sudoers destination path {sudoers_path}: missing file name")))?;
     let temp_path = sudoers.with_file_name(format!("{}.tmp", sudoers_file_name.to_string_lossy()));
     let mut temp_cleanup_guard = TempFileCleanupGuard::new(temp_path.clone());
 
@@ -252,31 +249,28 @@ fn write_sudoers_file_to(
         .custom_flags(libc::O_NOFOLLOW)
         .open(&temp_path)
         .map_err(|e| {
-            format!(
-                "Cannot create temporary sudoers file {} for destination {}: {e}",
-                temp_path.display(),
-                sudoers_path
+            Error::IoContext(
+                format!("Cannot create temporary sudoers file {} for destination {}", temp_path.display(), sudoers_path),
+                e
             )
         })?;
     f.set_permissions(std::fs::Permissions::from_mode(0o440))
         .map_err(|e| {
-            format!(
-                "Cannot set permissions on temporary sudoers file {}: {e}",
-                temp_path.display()
+            Error::IoContext(
+                format!("Cannot set permissions on temporary sudoers file {}", temp_path.display()),
+                e
             )
         })?;
     f.write_all(content.as_bytes()).map_err(|e| {
-        format!(
-            "Cannot write temporary sudoers file {} for destination {}: {e}",
-            temp_path.display(),
-            sudoers_path
+        Error::IoContext(
+            format!("Cannot write temporary sudoers file {} for destination {}", temp_path.display(), sudoers_path),
+            e
         )
     })?;
     f.sync_all().map_err(|e| {
-        format!(
-            "Cannot flush temporary sudoers file {} for destination {}: {e}",
-            temp_path.display(),
-            sudoers_path
+        Error::IoContext(
+            format!("Cannot flush temporary sudoers file {} for destination {}", temp_path.display(), sudoers_path),
+            e
         )
     })?;
     drop(f);
@@ -301,35 +295,34 @@ fn write_sudoers_file_to(
     }
     let visudo_output = visudo_output.ok_or_else(|| {
         if visudo_exec_errors.is_empty() {
-            format!(
+            Error::System(format!(
                 "Cannot execute visudo from known paths (/usr/sbin/visudo, /usr/bin/visudo) \
 while validating sudoers destination {} for temporary file {}: command not found",
                 sudoers_path,
                 temp_path.display()
-            )
+            ))
         } else {
-            format!(
+            Error::System(format!(
                 "Cannot execute visudo from known paths (/usr/sbin/visudo, /usr/bin/visudo) \
 while validating sudoers destination {} for temporary file {}: {}",
                 sudoers_path,
                 temp_path.display(),
                 visudo_exec_errors.join("; ")
-            )
+            ))
         }
     })?;
     if !visudo_output.status.success() {
-        return Err(visudo_validation_failed_message(
+        return Err(Error::Validation(visudo_validation_failed_message(
             &temp_path,
             sudoers_path,
             &visudo_output,
-        ));
+        )));
     }
 
     std::fs::rename(&temp_path, sudoers).map_err(|e| {
-        format!(
-            "Cannot atomically replace sudoers destination {} with temporary file {}: {e}",
-            sudoers_path,
-            temp_path.display()
+        Error::IoContext(
+            format!("Cannot atomically replace sudoers destination {} with temporary file {}", sudoers_path, temp_path.display()),
+            e
         )
     })?;
     temp_cleanup_guard.disarm();
@@ -524,7 +517,7 @@ mod tests {
         )
         .expect_err("invalid sudoers content should fail visudo validation");
         assert!(
-            err.contains("visudo validation failed"),
+            err.to_string().contains("visudo validation failed"),
             "unexpected error: {err}"
         );
 

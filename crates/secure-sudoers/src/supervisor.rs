@@ -1,6 +1,7 @@
 use crate::exec;
 use secure_sudoers_common::models::SecureSudoersPolicy;
 use secure_sudoers_common::validator::ValidatedCommand;
+use secure_sudoers_common::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -10,7 +11,10 @@ extern "C" fn sigwinch_handler(_: libc::c_int) {
     SIGWINCH_RECEIVED.store(true, Ordering::SeqCst);
 }
 
-pub fn run_supervisor(cmd: &ValidatedCommand, policy: &SecureSudoersPolicy) -> Result<i32, String> {
+pub fn run_supervisor(
+    cmd: &ValidatedCommand,
+    policy: &SecureSudoersPolicy,
+) -> Result<i32, Error> {
     let stdin_is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
     let mut _tg = None;
 
@@ -38,11 +42,14 @@ pub fn run_supervisor(cmd: &ValidatedCommand, policy: &SecureSudoersPolicy) -> R
             }
             std::process::exit(0);
         }
-        Err(e) => Err(format!("fork failed: {e}")),
+        Err(e) => Err(Error::Execution(format!("fork failed: {e}"))),
     }
 }
 
-fn supervise_direct_child(child: nix::unistd::Pid, stdin_is_tty: bool) -> Result<i32, String> {
+fn supervise_direct_child(
+    child: nix::unistd::Pid,
+    stdin_is_tty: bool,
+) -> Result<i32, Error> {
     loop {
         if SIGWINCH_RECEIVED.swap(false, Ordering::SeqCst) && stdin_is_tty {
             let child_tty = open_child_stdin_tty(child);
@@ -61,49 +68,58 @@ fn supervise_direct_child(child: nix::unistd::Pid, stdin_is_tty: bool) -> Result
             Err(nix::errno::Errno::EINTR) => continue,
             Err(e) => {
                 let _ = terminate_supervised_descendants(child);
-                return Err(format!("waitpid failed: {e}"));
+                return Err(Error::IoContext(format!("waitpid for child {child} failed"), std::io::Error::from(e)));
             }
             _ => continue,
         }
     }
 }
 
-fn set_own_process_group() -> Result<(), String> {
+fn set_own_process_group() -> Result<(), Error> {
     match nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0)) {
         Ok(()) => Ok(()),
-        Err(e) => Err(format!("setpgid(0, 0) failed: {e}")),
+        Err(e) => Err(Error::IoContext(
+            "setpgid(0, 0) failed".to_string(),
+            std::io::Error::from(e),
+        )),
     }
 }
 
-fn set_child_process_group(child: nix::unistd::Pid) -> Result<(), String> {
+fn set_child_process_group(child: nix::unistd::Pid) -> Result<(), Error> {
     match nix::unistd::setpgid(child, child) {
         Ok(()) => Ok(()),
         Err(nix::errno::Errno::ESRCH) | Err(nix::errno::Errno::EACCES) => Ok(()),
-        Err(e) => Err(format!("setpgid({child}, {child}) failed: {e}")),
+        Err(e) => Err(Error::IoContext(
+            format!("setpgid({child}, {child}) failed"),
+            std::io::Error::from(e),
+        )),
     }
 }
 
-fn set_parent_death_signal(sig: libc::c_int) -> Result<(), String> {
+fn set_parent_death_signal(sig: libc::c_int) -> Result<(), Error> {
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, sig, 0, 0, 0) } != 0 {
-        return Err(format!(
-            "prctl(PR_SET_PDEATHSIG, {sig}) failed: {}",
-            std::io::Error::last_os_error()
+        return Err(Error::IoContext(
+            format!("prctl(PR_SET_PDEATHSIG, {sig}) failed"),
+            std::io::Error::last_os_error(),
         ));
     }
     Ok(())
 }
 
-fn set_subreaper() -> Result<(), String> {
+fn set_subreaper() -> Result<(), Error> {
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
-        return Err(format!(
-            "prctl(PR_SET_CHILD_SUBREAPER) failed: {}",
-            std::io::Error::last_os_error()
+        return Err(Error::IoContext(
+            "prctl(PR_SET_CHILD_SUBREAPER) failed".to_string(),
+            std::io::Error::last_os_error(),
         ));
     }
     Ok(())
 }
 
-fn send_signal_to_process_group(pgid: libc::pid_t, signal: libc::c_int) -> Result<(), String> {
+fn send_signal_to_process_group(
+    pgid: libc::pid_t,
+    signal: libc::c_int,
+) -> Result<(), Error> {
     if pgid <= 0 {
         return Ok(());
     }
@@ -114,11 +130,11 @@ fn send_signal_to_process_group(pgid: libc::pid_t, signal: libc::c_int) -> Resul
     if err.raw_os_error() == Some(libc::ESRCH) {
         Ok(())
     } else {
-        Err(format!("kill(-{pgid}, {signal}) failed: {err}"))
+        Err(Error::Execution(format!("kill(-{pgid}, {signal}) failed: {err}")))
     }
 }
 
-fn send_signal_to_pid(pid: libc::pid_t, signal: libc::c_int) -> Result<(), String> {
+fn send_signal_to_pid(pid: libc::pid_t, signal: libc::c_int) -> Result<(), Error> {
     if unsafe { libc::kill(pid, signal) } == 0 {
         return Ok(());
     }
@@ -126,7 +142,9 @@ fn send_signal_to_pid(pid: libc::pid_t, signal: libc::c_int) -> Result<(), Strin
     if err.raw_os_error() == Some(libc::ESRCH) {
         Ok(())
     } else {
-        Err(format!("kill({pid}, {signal}) failed: {err}"))
+        Err(Error::Execution(format!(
+            "kill({pid}, {signal}) failed: {err}"
+        )))
     }
 }
 
@@ -152,10 +170,10 @@ fn process_group_exists(pgid: libc::pid_t) -> bool {
     }
 }
 
-fn list_direct_children(ppid: libc::pid_t) -> Result<Vec<libc::pid_t>, String> {
+fn list_direct_children(ppid: libc::pid_t) -> Result<Vec<libc::pid_t>, Error> {
     let mut children = Vec::new();
     let proc_entries =
-        std::fs::read_dir("/proc").map_err(|e| format!("read_dir('/proc') failed: {e}"))?;
+        std::fs::read_dir("/proc").map_err(|e| Error::IoContext("read_dir('/proc') failed".to_string(), e))?;
 
     for entry in proc_entries {
         let Ok(entry) = entry else {
@@ -197,7 +215,7 @@ fn reap_all_children_nonblocking() {
     }
 }
 
-fn terminate_adopted_descendants() -> Result<(), String> {
+fn terminate_adopted_descendants() -> Result<(), Error> {
     let supervisor_pid = unsafe { libc::getpid() };
 
     for (signal, rounds) in [(libc::SIGTERM, 10), (libc::SIGKILL, 10)] {
@@ -219,13 +237,11 @@ fn terminate_adopted_descendants() -> Result<(), String> {
     if remaining.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "failed to terminate descendant processes: {remaining:?}"
-        ))
+        Err(Error::System(format!("failed to terminate descendant processes: {remaining:?}")))
     }
 }
 
-fn terminate_supervised_descendants(child: nix::unistd::Pid) -> Result<(), String> {
+fn terminate_supervised_descendants(child: nix::unistd::Pid) -> Result<(), Error> {
     let child_pgid = child.as_raw();
     send_signal_to_process_group(child_pgid, libc::SIGTERM)?;
     if process_group_exists(child_pgid) {
@@ -240,10 +256,10 @@ struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    fn new() -> Result<Self, String> {
+    fn new() -> Result<Self, Error> {
         let mut termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut termios) } != 0 {
-            return Err("tcgetattr failed".to_string());
+            return Err(Error::IoContext("tcgetattr failed".to_string(), std::io::Error::last_os_error()));
         }
         let guard = Self {
             original_termios: termios,
@@ -252,7 +268,7 @@ impl TerminalGuard {
         let mut raw = termios;
         unsafe { libc::cfmakeraw(&mut raw) };
         if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSADRAIN, &raw) } != 0 {
-            return Err("tcsetattr failed".to_string());
+            return Err(Error::IoContext("tcsetattr failed".to_string(), std::io::Error::last_os_error()));
         }
 
         Ok(guard)
@@ -267,7 +283,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn install_sigwinch_handler() -> Result<(), String> {
+fn install_sigwinch_handler() -> Result<(), Error> {
     let sa = libc::sigaction {
         sa_sigaction: sigwinch_handler as *const () as usize,
         sa_mask: unsafe { std::mem::zeroed() },
@@ -275,7 +291,7 @@ fn install_sigwinch_handler() -> Result<(), String> {
         sa_restorer: None,
     };
     if unsafe { libc::sigaction(libc::SIGWINCH, &sa, std::ptr::null_mut()) } != 0 {
-        return Err("sigaction failed".to_string());
+        return Err(Error::IoContext("sigaction failed".to_string(), std::io::Error::last_os_error()));
     }
     Ok(())
 }
@@ -318,7 +334,7 @@ fn open_child_stdin_tty(child: nix::unistd::Pid) -> Option<ChildTtyForwarding> {
 fn forward_winsize_with_child_tty(
     child: nix::unistd::Pid,
     child_tty: Option<&ChildTtyForwarding>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     if unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) } != 0 {
         return Ok(());
@@ -343,7 +359,7 @@ fn forward_winsize_with_child_tty(
     send_signal_to_process_group(child.as_raw(), libc::SIGWINCH)
 }
 
-pub fn run_simple_supervisor(child: nix::unistd::Pid) -> Result<i32, String> {
+pub fn run_simple_supervisor(child: nix::unistd::Pid) -> Result<i32, Error> {
     match nix::sys::wait::waitpid(child, None) {
         Ok(nix::sys::wait::WaitStatus::Exited(_, code)) => Ok(code),
         Ok(nix::sys::wait::WaitStatus::Signaled(_, sig, _)) => Ok(128 + sig as i32),

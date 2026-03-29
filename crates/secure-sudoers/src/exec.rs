@@ -1,23 +1,24 @@
 use nix::unistd::fexecve;
 use secure_sudoers_common::models::SecureSudoersPolicy;
 use secure_sudoers_common::validator::ValidatedCommand;
+use secure_sudoers_common::error::Error;
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
 use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::path::Path;
 
-pub fn hash_binary_fd(fd_raw: std::os::unix::io::RawFd) -> Result<String, String> {
+pub fn hash_binary_fd(fd_raw: std::os::unix::io::RawFd) -> Result<String, Error> {
     let proc_path = format!("/proc/self/fd/{}", fd_raw);
     let file = std::fs::File::open(&proc_path)
-        .map_err(|e| format!("Cannot open binary for hashing via {}: {}", proc_path, e))?;
+        .map_err(|e| Error::IoContext(format!("Cannot open binary for hashing via {proc_path}"), e))?;
     let mut reader = std::io::BufReader::new(file);
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     loop {
         let n = reader
             .read(&mut buf)
-            .map_err(|e| format!("Read error while hashing binary: {}", e))?;
+            .map_err(|e| Error::IoContext("Read error while hashing binary".to_string(), e))?;
         if n == 0 {
             break;
         }
@@ -29,14 +30,14 @@ pub fn hash_binary_fd(fd_raw: std::os::unix::io::RawFd) -> Result<String, String
 pub fn execute_securely(
     cmd: &ValidatedCommand,
     policy: &SecureSudoersPolicy,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     use std::os::fd::AsRawFd;
 
     // Use the already opened FD from the validation phase to prevent TOCTOU
     let binary_fd_raw = unsafe { libc::dup(cmd.binary().fd.as_raw_fd()) };
     if binary_fd_raw < 0 {
-        return Err(format!(
-            "Failed to duplicate binary FD: {}",
+        return Err(Error::IoContext(
+            "fexecve open failed".to_string(),
             std::io::Error::last_os_error()
         ));
     }
@@ -49,10 +50,9 @@ pub fn execute_securely(
         &policy.global_settings.blocked_paths,
         cmd.binary(),
         cmd.args(),
-    )
-    .map_err(|e| format!("Isolation setup failed: {e}"))?;
+    )?;
 
-    crate::isolation::drop_capabilities().map_err(|e| format!("Capability drop failed: {e}"))?;
+    crate::isolation::drop_capabilities()?;
 
     let binary_name = Path::new(&cmd.binary().path)
         .file_name()
@@ -60,21 +60,22 @@ pub fn execute_securely(
         .unwrap_or(&cmd.binary().path);
     let mut argv: Vec<CString> = Vec::with_capacity(1 + cmd.args().len());
     argv.push(
-        CString::new(binary_name).map_err(|e| format!("Binary name contains NUL byte: {e}"))?,
+        CString::new(binary_name).map_err(|e| Error::System(format!("Binary name contains NUL byte: {e}")))?,
     );
     for arg in cmd.args() {
         let arg_str = arg.as_str();
         argv.push(
             CString::new(arg_str)
-                .map_err(|e| format!("Argument '{}' contains NUL byte: {e}", arg_str))?,
+                .map_err(|e| Error::System(format!("Argument '{}' contains NUL byte: {e}", arg_str)))?,
         );
     }
 
-    let envp: Result<Vec<CString>, String> = clean_env
+    let envp: Result<Vec<CString>, Error> = clean_env
         .iter()
         .map(|(k, v)| {
-            CString::new(format!("{k}={v}"))
-                .map_err(|e| format!("Env var '{k}' contains NUL byte: {e}"))
+            CString::new(format!("{k}={v}")).map_err(|e| {
+                Error::System(format!("Env var '{k}' contains NUL byte: {e}"))
+            })
         })
         .collect();
     let envp = envp?;
@@ -95,9 +96,9 @@ pub fn execute_securely(
         }
         Ok(nix::unistd::ForkResult::Child) => match fexecve(&binary_file, &argv, &envp) {
             Ok(infallible) => match infallible {},
-            Err(e) => Err(format!("fexecve failed: {e}")),
+            Err(e) => Err(Error::IoContext("fexecve failed".to_string(), std::io::Error::from(e))),
         },
-        Err(e) => Err(format!("fork failed: {e}")),
+        Err(e) => Err(Error::IoContext("fork failed".to_string(), std::io::Error::from(e))),
     }
 }
 
