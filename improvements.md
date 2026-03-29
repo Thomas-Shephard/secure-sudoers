@@ -22,12 +22,6 @@ Baseline status at audit time:
 3. **Impact:** Harder auditing, review overhead, and increased regression probability.
 4. **Suggested Direction:** Split by concern (invocation parsing, policy loading, redaction, mount ops, installer IO).
 
-### 14. Error model is stringly typed across boundaries
-1. **Location:** Cross-crate (`Result<_, String>` throughout runtime paths)
-2. **Issue:** Unstructured errors limit context chaining and reliable classification.
-3. **Impact:** Fragile error propagation and weaker observability/debuggability.
-4. **Suggested Direction:** Introduce typed error enums (`thiserror`) with source preservation and stable categories.
-
 ### 15. Dependency surface can be tightened in `secure-sudoers`
 1. **Location:** `crates/secure-sudoers/Cargo.toml`
 2. **Issue:** Some dependencies appear heavier than runtime requirements (e.g., keygen/testing-oriented crates in runtime crate).

@@ -137,7 +137,8 @@ pub fn validate_command(
         &policy.global_settings.blocked_paths,
     )
     .map_err(|e| {
-        ValidationDenial::new(e, crate::telemetry::denial_reason::BLOCKED_PATH).with_rule(&rule_id)
+        ValidationDenial::new(e.to_string(), crate::telemetry::denial_reason::BLOCKED_PATH)
+            .with_rule(&rule_id)
     })?;
 
     let safe_re = Regex::new(&policy.global_settings.safe_arg_regex).map_err(|_| {
@@ -186,19 +187,22 @@ pub fn validate_command(
             };
             for rem in iter {
                 helpers::push_positional(rem, &p_params, &mut out).map_err(|e| {
-                    ValidationDenial::new(e, crate::telemetry::denial_reason::BLOCKED_ARGUMENT)
-                        .with_rule(&rule_id)
+                    ValidationDenial::new(
+                        e.to_string(),
+                        crate::telemetry::denial_reason::BLOCKED_ARGUMENT,
+                    )
+                    .with_rule(&rule_id)
                 })?;
             }
             break;
         } else if arg.starts_with("--") {
             helpers::process_long_flag(arg, &v_params, &mut iter, &mut out).map_err(|e| {
-                ValidationDenial::new(e, crate::telemetry::denial_reason::UNKNOWN_FLAG)
+                ValidationDenial::new(e.to_string(), crate::telemetry::denial_reason::UNKNOWN_FLAG)
                     .with_rule(&rule_id)
             })?;
         } else if arg.starts_with('-') && arg.len() > 1 {
             helpers::process_short_flag(arg, &v_params, &mut iter, &mut out).map_err(|e| {
-                ValidationDenial::new(e, crate::telemetry::denial_reason::UNKNOWN_FLAG)
+                ValidationDenial::new(e.to_string(), crate::telemetry::denial_reason::UNKNOWN_FLAG)
                     .with_rule(&rule_id)
             })?;
         } else {
@@ -210,8 +214,11 @@ pub fn validate_command(
                 blocked_paths: &policy.global_settings.blocked_paths,
             };
             helpers::push_positional(arg, &p_params, &mut out).map_err(|e| {
-                ValidationDenial::new(e, crate::telemetry::denial_reason::BLOCKED_ARGUMENT)
-                    .with_rule(&rule_id)
+                ValidationDenial::new(
+                    e.to_string(),
+                    crate::telemetry::denial_reason::BLOCKED_ARGUMENT,
+                )
+                .with_rule(&rule_id)
             })?;
         }
     }

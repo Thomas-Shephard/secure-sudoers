@@ -1,4 +1,5 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use secure_sudoers_common::error::Error;
 use secure_sudoers_common::models::{
     ParameterConfig, ParameterType, SecurePath, SecureSudoersPolicy,
 };
@@ -10,14 +11,14 @@ use tracing::{error, warn};
 
 const PUBLIC_KEY_PATH: &str = "/etc/secure-sudoers/secure_sudoers_public_key.pem";
 
-pub fn parse_invocation(raw_argv: &[String]) -> Result<(String, Vec<String>), String> {
+pub fn parse_invocation(raw_argv: &[String]) -> Result<(String, Vec<String>), Error> {
     parse_invocation_internal(raw_argv, |v| std::env::var(v).ok())
 }
 
 fn parse_invocation_internal<F>(
     raw_argv: &[String],
     get_env: F,
-) -> Result<(String, Vec<String>), String>
+) -> Result<(String, Vec<String>), Error>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -50,8 +51,10 @@ where
     match get_env("SUDO_COMMAND") {
         Some(sudo_cmd) => {
             let tokens = shlex::split(&sudo_cmd).ok_or_else(|| {
-                "Spoofing attempt detected: invalid SUDO_COMMAND format (shell parsing failed)"
-                    .to_string()
+                Error::Spoofing(
+                    "Spoofing attempt detected: invalid SUDO_COMMAND format (shell parsing failed)"
+                        .to_string(),
+                )
             })?;
 
             let first_token = tokens.first().map(String::as_str).unwrap_or("");
@@ -72,10 +75,10 @@ where
                     sudo_command = %sudo_cmd,
                     "CRITICAL: Spoofing attempt detected! SUDO_COMMAND missing delegated command."
                 );
-                return Err(
+                return Err(Error::Spoofing(
                     "Spoofing attempt detected: SUDO_COMMAND is missing delegated command token"
                         .to_string(),
-                );
+                ));
             }
 
             let argv_tool_basename = basename(&argv_tool_token);
@@ -88,10 +91,10 @@ where
                     argv_tool = %argv_tool_basename,
                     "CRITICAL: Spoofing attempt detected! Invocation mismatch with SUDO_COMMAND."
                 );
-                return Err(format!(
+                return Err(Error::Spoofing(format!(
                     "Spoofing attempt detected: command '{}' does not match SUDO_COMMAND '{}'",
                     argv_tool_basename, sudo_tool_basename
-                ));
+                )));
             }
 
             Ok((sudo_tool_basename.to_string(), args))
@@ -217,12 +220,12 @@ where
     }
 
     let sudo_identity = executable_identity_from_path(&sudo_tool_token).map_err(|e| {
-        let failure_kind = if e.contains("file does not exist") {
-            "not_found"
-        } else if e.contains("permission denied") {
-            "permission_denied"
-        } else {
-            "io_error"
+        let failure_kind = match &e {
+            Error::IoContext(_, io_err) if io_err.kind() == ErrorKind::NotFound => "not_found",
+            Error::IoContext(_, io_err) if io_err.kind() == ErrorKind::PermissionDenied => {
+                "permission_denied"
+            }
+            _ => "io_error",
         };
         error!(
             sudo_tool = %sudo_tool_token,
@@ -267,38 +270,36 @@ where
     Ok(())
 }
 
-fn executable_identity_from_path(path: &str) -> Result<ExecutableIdentity, String> {
+fn executable_identity_from_path(path: &str) -> Result<ExecutableIdentity, Error> {
     use std::ffi::CString;
     use std::os::fd::{FromRawFd, OwnedFd};
 
-    let c_path = CString::new(path)
-        .map_err(|_| format!("cannot open executable path '{}': invalid NUL byte", path))?;
+    let c_path = CString::new(path).map_err(|_| {
+        Error::Validation(format!(
+            "cannot open executable path '{}': invalid NUL byte",
+            path
+        ))
+    })?;
     let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
     if fd < 0 {
-        let err = std::io::Error::last_os_error();
-        return Err(match err.kind() {
-            ErrorKind::NotFound => {
-                format!(
-                    "cannot open executable path '{}': file does not exist",
-                    path
-                )
-            }
-            ErrorKind::PermissionDenied => {
-                format!("cannot open executable path '{}': permission denied", path)
-            }
-            _ => format!("cannot open executable path '{}': {}", path, err),
-        });
+        return Err(Error::IoContext(
+            format!("cannot open executable path '{}'", path),
+            std::io::Error::last_os_error(),
+        ));
     }
 
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     executable_identity_from_fd(fd.as_raw_fd())
-        .map_err(|e| format!("cannot stat executable path '{}': {}", path, e))
+        .map_err(|e| Error::System(format!("cannot stat executable path '{}': {}", path, e)))
 }
 
-fn executable_identity_from_fd(fd: i32) -> Result<ExecutableIdentity, String> {
+fn executable_identity_from_fd(fd: i32) -> Result<ExecutableIdentity, Error> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe { libc::fstat(fd, st.as_mut_ptr()) } != 0 {
-        return Err(format!("fstat failed: {}", std::io::Error::last_os_error()));
+        return Err(Error::IoContext(
+            "fstat failed".to_string(),
+            std::io::Error::last_os_error(),
+        ));
     }
     let st = unsafe { st.assume_init() };
 
@@ -308,7 +309,7 @@ fn executable_identity_from_fd(fd: i32) -> Result<ExecutableIdentity, String> {
     })
 }
 
-pub fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
+pub fn load_policy(path: &str) -> Result<SecureSudoersPolicy, Error> {
     #[cfg(debug_assertions)]
     let pubkey_path =
         std::env::var("SECURE_SUDOERS_PUBKEY_PATH").unwrap_or_else(|_| PUBLIC_KEY_PATH.to_string());
@@ -320,46 +321,47 @@ pub fn load_policy(path: &str) -> Result<SecureSudoersPolicy, String> {
 pub(crate) fn load_policy_with_pubkey(
     path: &str,
     pubkey_path: &str,
-) -> Result<SecureSudoersPolicy, String> {
-    let policy_bytes =
-        std::fs::read(path).map_err(|e| format!("Failed to read policy {path}: {e}"))?;
+) -> Result<SecureSudoersPolicy, Error> {
+    let policy_bytes = std::fs::read(path)
+        .map_err(|e| Error::IoContext(format!("Failed to read policy {path}"), e))?;
 
     let pubkey_bytes =
-        secure_sudoers_common::util::read_pem_bytes(pubkey_path, "SECURE SUDOERS PUBLIC KEY")
-            .map_err(|e| {
-                format!("Integrity failure: cannot load public key from {pubkey_path}: {e}")
-            })?;
-    let pubkey_arr: [u8; 32] = pubkey_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| "Integrity failure: public key must be 32 bytes".to_string())?;
+        secure_sudoers_common::util::read_pem_bytes(pubkey_path, "SECURE SUDOERS PUBLIC KEY")?;
+    let pubkey_arr: [u8; 32] = pubkey_bytes.as_slice().try_into().map_err(|_| {
+        Error::Validation("Integrity failure: public key must be 32 bytes".to_string())
+    })?;
     let verifying_key = VerifyingKey::from_bytes(&pubkey_arr)
-        .map_err(|e| format!("Integrity failure: invalid public key: {e}"))?;
+        .map_err(|e| Error::Validation(format!("Integrity failure: invalid public key: {e}")))?;
 
     let sig_path = format!("{path}.sig");
     let sig_bytes = std::fs::read(&sig_path).map_err(|e| {
-        format!("Integrity failure: policy signature file {sig_path} missing or unreadable: {e}")
+        Error::IoContext(
+            format!("Integrity failure: policy signature file {sig_path} missing or unreadable"),
+            e,
+        )
     })?;
     let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
-        format!(
+        Error::Validation(format!(
             "Integrity failure: signature must be 64 bytes (got {})",
             sig_bytes.len()
-        )
+        ))
     })?;
     let signature = Signature::from_bytes(&sig_arr);
 
     verifying_key
         .verify(&policy_bytes, &signature)
         .map_err(|e| {
-            format!("Integrity failure: policy signature verification failed for {path}: {e}")
+            Error::Security(format!(
+                "Integrity failure: policy signature verification failed for {path}: {e}"
+            ))
         })?;
 
     let mut policy: SecureSudoersPolicy = serde_json::from_slice(&policy_bytes)
-        .map_err(|e| format!("Failed to parse validated policy JSON: {e}"))?;
+        .map_err(|e| Error::Parse(format!("Failed to parse validated policy JSON: {e}")))?;
 
     policy
         .validate()
-        .map_err(|e| format!("Policy validation failed: {e}"))?;
+        .map_err(|e| Error::Validation(format!("Policy validation failed: {e}")))?;
     Ok(policy)
 }
 
@@ -768,7 +770,12 @@ mod tests {
         };
         let result = parse_invocation_internal(&argv(&["secure-sudoers", "apt", "install"]), env);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Spoofing attempt detected"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Spoofing attempt detected")
+        );
     }
 
     #[test]
@@ -854,7 +861,12 @@ mod tests {
 
         let result = parse_invocation_internal(&argv(&["secure-sudoers", "true", "install"]), env);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Spoofing attempt detected"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Spoofing attempt detected")
+        );
     }
 
     #[test]
@@ -1051,7 +1063,10 @@ mod tests {
         let result = load_policy_with_pubkey(&missing, "/dev/null");
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("Failed to read policy"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read policy"),
             "expected 'Failed to read policy' in error"
         );
     }
@@ -1070,7 +1085,7 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(
-            msg.contains("missing or unreadable"),
+            msg.to_string().contains("missing or unreadable"),
             "expected 'missing or unreadable' in error, got: {msg}"
         );
     }
@@ -1091,7 +1106,7 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(
-            msg.contains("signature must be 64 bytes"),
+            msg.to_string().contains("signature must be 64 bytes"),
             "expected size error, got: {msg}"
         );
     }
@@ -1109,7 +1124,7 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(
-            msg.contains("signature verification failed"),
+            msg.to_string().contains("signature verification failed"),
             "expected 'signature verification failed', got: {msg}"
         );
     }

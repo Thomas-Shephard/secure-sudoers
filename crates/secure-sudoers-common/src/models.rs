@@ -1,3 +1,4 @@
+use crate::error::Error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -320,24 +321,27 @@ fn canonicalize_path_list_entries(
     list_name: &str,
     tool_name: &str,
     config_label: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     let mut canonicalized = Vec::with_capacity(entries.len());
     for entry in entries.iter() {
         let path = std::path::Path::new(entry);
         if !path.is_absolute() {
-            return Err(format!(
+            return Err(Error::Config(format!(
                 "{} entry '{}' for {} in tool '{}' must be an absolute path",
                 list_name, entry, config_label, tool_name
-            ));
+            )));
         }
 
         match std::fs::canonicalize(path) {
             Ok(path) => canonicalized.push(path.to_string_lossy().into_owned()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => canonicalized.push(entry.clone()),
             Err(e) => {
-                return Err(format!(
-                    "Security failure: cannot canonicalize {} path '{}' for {} in tool '{}': {}",
-                    list_name, entry, config_label, tool_name, e
+                return Err(Error::IoContext(
+                    format!(
+                        "Security failure: cannot canonicalize {} path '{}' for {} in tool '{}'",
+                        list_name, entry, config_label, tool_name
+                    ),
+                    e,
                 ));
             }
         }
@@ -350,7 +354,7 @@ fn canonicalize_path_list_config_entries(
     config: &mut ParameterConfig,
     tool_name: &str,
     config_label: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if config.param_type != ParameterType::Path {
         return Ok(());
     }
@@ -370,13 +374,13 @@ fn compile_parameter_regex(
     config: &mut ParameterConfig,
     tool_name: &str,
     config_label: &str,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if let Some(regex_str) = config.regex.as_ref() {
         let compiled = regex::Regex::new(regex_str).map_err(|_| {
-            format!(
+            Error::Parse(format!(
                 "Invalid regex '{}' in {} for tool '{}'",
                 regex_str, config_label, tool_name
-            )
+            ))
         })?;
         config.compiled_regex = Some(compiled);
     } else {
@@ -387,15 +391,18 @@ fn compile_parameter_regex(
 }
 
 impl SecureSudoersPolicy {
-    pub fn validate(&mut self) -> Result<(), String> {
+    pub fn validate(&mut self) -> Result<(), Error> {
         if regex::Regex::new(&self.global_settings.safe_arg_regex).is_err() {
-            return Err("Invalid regex in safe_arg_regex".to_string());
+            return Err(Error::Parse("Invalid regex in safe_arg_regex".into()));
         }
 
         let mut canonicalized_blocked = Vec::new();
         for path in &self.global_settings.blocked_paths {
             if !path.starts_with('/') {
-                return Err(format!("Blocked path must be absolute: {}", path));
+                return Err(Error::Config(format!(
+                    "Blocked path must be absolute: {}",
+                    path
+                )));
             }
             match std::fs::canonicalize(path) {
                 Ok(p) => canonicalized_blocked.push(p.to_string_lossy().into_owned()),
@@ -403,9 +410,12 @@ impl SecureSudoersPolicy {
                     canonicalized_blocked.push(path.clone());
                 }
                 Err(e) => {
-                    return Err(format!(
-                        "Security failure: cannot canonicalize blocked path '{}': {}",
-                        path, e
+                    return Err(Error::IoContext(
+                        format!(
+                            "Security failure: cannot canonicalize blocked path '{}'",
+                            path
+                        ),
+                        e,
                     ));
                 }
             }
@@ -414,13 +424,16 @@ impl SecureSudoersPolicy {
 
         for (name, tool) in &mut self.tools {
             if !is_valid_tool_name(name) {
-                return Err(format!("Invalid tool name in policy: '{}'", name));
+                return Err(Error::Validation(format!(
+                    "Invalid tool name in policy: '{}'",
+                    name
+                )));
             }
             if !tool.real_binary.starts_with('/') {
-                return Err(format!(
+                return Err(Error::Config(format!(
                     "real_binary for tool '{}' must be an absolute path",
                     name
-                ));
+                )));
             }
             for (flag, config) in &mut tool.parameters {
                 compile_parameter_regex(config, name, &format!("parameter '{}'", flag))?;
@@ -584,7 +597,7 @@ mod tests {
         p.global_settings.safe_arg_regex = "[unclosed bracket".to_string();
         let err = p.validate().unwrap_err();
         assert!(
-            err.contains("Invalid regex in safe_arg_regex"),
+            err.to_string().contains("Invalid regex in safe_arg_regex"),
             "got: {err}"
         );
     }
@@ -594,7 +607,10 @@ mod tests {
         let mut p = make_valid_policy();
         p.global_settings.blocked_paths = vec!["etc/shadow".to_string()];
         let err = p.validate().unwrap_err();
-        assert!(err.contains("Blocked path must be absolute"), "got: {err}");
+        assert!(
+            err.to_string().contains("Blocked path must be absolute"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -603,7 +619,7 @@ mod tests {
         p.tools
             .insert("bad/name".to_string(), make_tool("/usr/bin/tool"));
         let err = p.validate().unwrap_err();
-        assert!(err.contains("Invalid tool name"), "got: {err}");
+        assert!(err.to_string().contains("Invalid tool name"), "got: {err}");
     }
 
     #[test]
@@ -611,7 +627,10 @@ mod tests {
         let mut p = make_valid_policy();
         p.tools.insert("mytool".to_string(), make_tool("bin/ls"));
         let err = p.validate().unwrap_err();
-        assert!(err.contains("must be an absolute path"), "got: {err}");
+        assert!(
+            err.to_string().contains("must be an absolute path"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -632,7 +651,7 @@ mod tests {
         );
         p.tools.insert("mytool".to_string(), tool);
         let err = p.validate().unwrap_err();
-        assert!(err.contains("Invalid regex"), "got: {err}");
+        assert!(err.to_string().contains("Invalid regex"), "got: {err}");
     }
 
     #[test]
@@ -645,7 +664,7 @@ mod tests {
 
         let err = p.validate().unwrap_err();
         assert!(
-            err.contains("must be an absolute path"),
+            err.to_string().contains("must be an absolute path"),
             "unexpected error: {err}"
         );
     }
@@ -677,7 +696,7 @@ mod tests {
 
         let err = p.validate().unwrap_err();
         assert!(
-            err.contains("cannot canonicalize disallowed path"),
+            err.to_string().contains("cannot canonicalize"),
             "unexpected error: {err}"
         );
     }
@@ -726,7 +745,7 @@ mod tests {
 
         let err = p.validate().unwrap_err();
         assert!(
-            err.contains("must be an absolute path"),
+            err.to_string().contains("must be an absolute path"),
             "unexpected: {err}"
         );
     }
@@ -775,7 +794,7 @@ mod tests {
 
         let err = p.validate().unwrap_err();
         assert!(
-            err.contains("must be an absolute path"),
+            err.to_string().contains("must be an absolute path"),
             "unexpected: {err}"
         );
     }
